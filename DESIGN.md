@@ -38,6 +38,10 @@ You lead a settlement besieged by a monstrous horde that grows out of a **living
 | Failure | Death spiral, but recoverable |
 | Meta-progression | Unlocks only (no permanent power) |
 | Platform | Web, TypeScript |
+| Intel decay | Event-driven: intel stays valid until the land shifts in its sector, then it is marked uncertain |
+| Squad roles | Militia, Archers, Scouts, Builders |
+| The source | A single heart that grows toward the colony; if it arrives, the run is lost |
+| Tone | Hopeful melancholy: the land is wounded and can heal |
 
 ---
 
@@ -99,10 +103,7 @@ The colony is a small diorama of **districts** arranged around a **Keep** (the c
 A ring of nodes around the settlement, representing the land within reach.
 - **Node types:** Forage, Ruins, Refugee Camp, Horde Nest, Blight Zone, Strange Site (event), Source Trail.
 - **The land moves:** each day some nodes drift, transform, appear or vanish. Nests grow, forage depletes, blight spreads.
-- **Intel decay:** every node shows *what you last saw* and *how long ago*. Confidence drops each day:
-  - Fresh (0–1 days): accurate.
-  - Aging (2–3 days): contents may have changed; odds shown with wider ranges.
-  - Stale (4+ days): marked "unknown"; may not even exist anymore.
+- **Intel decay [Decided: event-driven]:** every tile shows *what you last saw* and *when*. Intel stays valid until the land **shifts** in that tile's sector (one of 8 compass sectors). The player is told only *where* the land shifted ("The land shifts to the NE"), not which tiles changed, so every known tile in that sector becomes **uncertain** (~). Shifts cluster around the heart and grow more frequent as it nears.
 - **Scouting** refreshes intel on a node and its neighbours; better scouts see further and more precisely.
 
 ---
@@ -148,6 +149,8 @@ After a battle: casualties, wounded squads, district damage, salvage. Losses com
 
 ## 9. Run arc & win condition
 
+**[Decided] The heart grows toward you.** The source is a single *heart of the blight* that starts at the edge of the wilds and advances one tile toward the colony every 4–6 days, leaving blight and new nests behind. If it reaches the colony, the run is lost. This is the run's clock. Clearing nests heals the land (they become regrowth) and weakens the heart, so pushing back against the blight is also how you make the final strike winnable.
+
 1. **Early (cycles 1–3):** stabilise, learn the land, establish scouting.
 2. **Mid (cycles 4–6):** follow **Source Trail** nodes; the source moves, so trails go cold if not followed up.
 3. **Late (cycles 7–10):** locate the source and launch the **final expedition**. The colony must withstand a last assault with whoever stays behind.
@@ -192,12 +195,32 @@ Finishing or losing runs unlocks new **buildings, doctrines, specials, events, h
 
 ## 13. Open questions
 
-- How fast should intel decay, and is decay per-node or global?
 - Exact district count and building list.
-- How many squad roles? (Proposal: Militia, Archers, Scouts, Builders.)
 - Can squads be reassigned mid-day, or only at day start?
 - Does the Wilds view live in the same 3D scene or a separate map screen?
-- How does the source move, and how readable should its trail be?
+- How readable should the heart's trail be? (Prototype: scouting near blight reports the direction to the heart.)
 - What does the final expedition look like mechanically?
 - How much control does the camera have during battles?
-- Name and tone (grim, hopeful, whimsical?).
+- Final name. (Working title: *Holdfast*.)
+
+---
+
+## 14. Phase 0 prototype: status
+
+Playable in the browser (`npm run dev`). It is deliberately plain: a grid of the wilds, panels and text, with no 3D yet. The goal is to test whether the decisions are interesting.
+
+**What is in it**
+- 9×9 wilds around the colony with forage, ruins, survivors, nests, blight, strange sites and regrowth.
+- Event-driven intel decay by sector, watchtowers that keep nearby intel fresh.
+- The heart: hidden, advancing, findable by scouting and blight trails; strike it with a party (visible odds).
+- Squads of up to 5 with four roles, wounded/fit split, training, merging, and Guard / Work / Expedition assignments.
+- Settlement: walls (3 levels) and towers in four directions, granary, infirmary, workshop, hearth, equipment levels.
+- Doctrines (hold vs fall back, protect people vs stores).
+- Warning signs and an assault estimate whose precision depends on fresh intel.
+- Round-based battle resolution with three interventions (bell, fire the stores, retreat).
+- Six choice events, five specials.
+- Deterministic seeded core, unit tests, and a headless bot for balance runs (`npm run sim`).
+
+**Balance snapshot (simple heuristic bot, 500 seeds):** about 28% wins, runs average 16 days and 3–4 assaults. Losses split roughly 60/40 between the heart arriving and the keep falling. A thoughtful human should do noticeably better than this bot; playtesting will tell.
+
+**Known gaps:** no saving across versions, no meta-progression, the battle is a dice resolver rather than a spatial simulation, very little flavour text, no sound.
