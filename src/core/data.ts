@@ -1,9 +1,9 @@
-import type { FeatureKind, GiftId, HordeType, InnerBuilding, Labor, Pool, Role, SpecialId } from './types';
+import type { Element, FeatureKind, GiftId, HordeType, InnerBuilding, Labor, PlotKey, Pool, Role, SpecialId } from './types';
 
 /** World radius in units. The colony is at the centre. */
 export const WORLD_R = 100;
-export const WALL_R = 9;
-export const HOME_R = 6;
+export const WALL_R = 13;
+export const HOME_R = 9;
 /** Fixed simulation step, in hours. */
 export const DT = 0.05;
 export const DAWN = 6;
@@ -25,7 +25,7 @@ export const LABOR_INFO: Record<Labor, { label: string; desc: string }> = {
   gather: { label: 'Gather', desc: 'Forage forests and salvage ruins for supplies.' },
   build: { label: 'Build', desc: 'Work on construction and mend the walls.' },
   scout: { label: 'Scout', desc: 'Walk into the fog, keep the map fresh, find survivors.' },
-  guard: { label: 'Guard', desc: 'Hold the walls. Hunt nests when it is quiet.' },
+  drill: { label: 'Drill', desc: 'Train at home and grow into veterans. Defend when the horde comes.' },
 };
 
 export const POOL_OF: Record<Role, Pool> = { villager: 'economy', builder: 'economy', militia: 'military', archer: 'military', scout: 'military' };
@@ -34,15 +34,16 @@ export const HORDE_INFO: Record<HordeType, { label: string; hp: number; dps: num
   swarmer: { label: 'Swarmers', hp: 2, dps: 1.5, wallDps: 2, speed: 6, cost: 1 },
   brute: { label: 'Brutes', hp: 10, dps: 3.5, wallDps: 8, speed: 4.5, cost: 3 },
   flier: { label: 'Fliers', hp: 3, dps: 1.5, wallDps: 0, speed: 9, cost: 2 },
+  shade: { label: 'Night stalkers', hp: 3, dps: 2, wallDps: 0, speed: 8.5, cost: 2 },
 };
 
 /** Damage multiplier of a role against a horde type. */
 export const ROLE_VS: Record<Role, Record<HordeType, number>> = {
-  villager: { swarmer: 1, brute: 0.6, flier: 0.6 },
-  militia: { swarmer: 1, brute: 1.5, flier: 0.8 },
-  archer: { swarmer: 1.1, brute: 0.6, flier: 1.7 },
-  scout: { swarmer: 1, brute: 0.7, flier: 1 },
-  builder: { swarmer: 1, brute: 0.6, flier: 0.6 },
+  villager: { swarmer: 1, brute: 0.6, flier: 0.6, shade: 0.7 },
+  militia: { swarmer: 1, brute: 1.5, flier: 0.8, shade: 1.2 },
+  archer: { swarmer: 1.1, brute: 0.6, flier: 1.7, shade: 1 },
+  scout: { swarmer: 1, brute: 0.7, flier: 1, shade: 1.3 },
+  builder: { swarmer: 1, brute: 0.6, flier: 0.6, shade: 0.7 },
 };
 
 export const FEATURE_INFO: Record<FeatureKind, { label: string }> = {
@@ -103,3 +104,54 @@ export const NAMES = [
   'Orin', 'Pell', 'Quin', 'Rhea', 'Sol', 'Tam', 'Una', 'Vey', 'Wren', 'Yew', 'Zara', 'Alder', 'Briar', 'Corin',
   'Del', 'Elm', 'Faye', 'Garr', 'Hollis', 'Ives', 'June', 'Kell', 'Linn', 'Moss', 'Nim', 'Oak', 'Pim', 'Rook',
 ];
+
+// ───────────── Rings ─────────────
+
+export const ARCS = 6;
+/** Inner and outer radius of each ring, innermost first. */
+export const RINGS: { inner: number; outer: number; name: string }[] = [
+  { inner: 18, outer: 36, name: 'Inner ring' },
+  { inner: 36, outer: 58, name: 'Middle ring' },
+  { inner: 58, outer: 80, name: 'Outer ring' },
+];
+
+export const ELEMENT_INFO: Record<Element, { label: string; effect: string; color: string }> = {
+  ember: { label: 'Ember', effect: 'Burns swarmers; enrages brutes and fliers.', color: '--el-ember' },
+  frost: { label: 'Frost', effect: 'Slows everything that crosses it for the rest of the march.', color: '--el-frost' },
+  mire: { label: 'Mire', effect: 'Bogs down walkers while they wade through. Fliers pass over.', color: '--el-mire' },
+  bloom: { label: 'Bloom', effect: 'Swells whatever crosses it: half again as tough.', color: '--el-bloom' },
+};
+
+// ───────────── Building plots ─────────────
+
+export interface PlotInfo {
+  label: string;
+  /** What each level does, starting with level 1. */
+  levels: string[];
+  cost: { supplies: number; work: number }[];
+  angle: number;
+  r: number;
+}
+
+const deg = (d: number) => (d * Math.PI) / 180;
+const tower = (angle: number): PlotInfo => ({
+  label: 'Watchtower',
+  levels: ['Shoots the horde and keeps nearby land in sight.', 'Heavier bows, longer reach.'],
+  cost: [{ supplies: 30, work: 25 }, { supplies: 60, work: 40 }],
+  angle,
+  r: WALL_R,
+});
+
+export const PLOT_INFO: Record<PlotKey, PlotInfo> = {
+  palisade: { label: 'Palisade', levels: ['A ring of stakes. Holds back walkers; fliers pass over.', 'Timber walls, twice as sturdy.', 'Stone footings, three times as sturdy.'], cost: [{ supplies: 0, work: 0 }, { supplies: 70, work: 60 }, { supplies: 120, work: 90 }], angle: deg(270), r: WALL_R },
+  granary: { label: 'Granary', levels: ['Everyone eats a quarter less.', 'Everyone eats almost half less.'], cost: [{ supplies: 35, work: 30 }, { supplies: 70, work: 45 }], angle: deg(30), r: 7 },
+  infirmary: { label: 'Infirmary', levels: ['The wounded heal twice as fast; more survive.', 'Three times as fast; most survive.'], cost: [{ supplies: 40, work: 30 }, { supplies: 70, work: 40 }], angle: deg(150), r: 7 },
+  workshop: { label: 'Workshop', levels: ['Arms and tools: +20% fighting power.', '+40% fighting power.', '+60% fighting power.'], cost: [{ supplies: 40, work: 30 }, { supplies: 70, work: 40 }, { supplies: 110, work: 60 }], angle: deg(270), r: 6.5 },
+  hearth: { label: 'Hearth', levels: ['A light in the dark. Wanderers find their way to you.', 'A great fire. Wanderers come often.'], cost: [{ supplies: 40, work: 30 }, { supplies: 80, work: 50 }], angle: deg(90), r: 4 },
+  barracks: { label: 'Barracks', levels: ['Soldiers drill twice as fast.', 'Three times as fast; soldiers are hardier.'], cost: [{ supplies: 45, work: 35 }, { supplies: 90, work: 50 }], angle: deg(210), r: 9.5 },
+  lodge: { label: 'Scouts’ Lodge', levels: ['Scouts see 30% further and travel faster.', 'Scouts see 60% further and read the rings from afar.'], cost: [{ supplies: 35, work: 30 }, { supplies: 70, work: 40 }], angle: deg(330), r: 9.5 },
+  towerNE: tower(deg(45)),
+  towerNW: tower(deg(135)),
+  towerSW: tower(deg(225)),
+  towerSE: tower(deg(315)),
+};

@@ -1,6 +1,7 @@
-import { MAX_EQUIPMENT } from './data';
+import { PLOT_INFO } from './data';
 import { chance, pick } from './rng';
-import { addLog, grantRandomSpecial, spawnColonist } from './state';
+import { addLog, grantRandomSpecial, plotLevel, spawnColonist } from './state';
+import { raisePlot } from './sim';
 import type { Colonist, GameState, PendingEvent } from './types';
 import { sectorName } from './world';
 
@@ -115,16 +116,15 @@ export const EVENTS: Record<string, EventDef> = {
       title: 'A Lost Merchant',
       text: 'A merchant wagon has wandered off every road that still exists. Its driver will trade for food.',
       options: [
-        { label: 'Buy tools and arms', hint: s.settlement.equipment < MAX_EQUIPMENT ? '−20 supplies · equipment +1' : 'Already fully equipped' },
+        { label: 'Buy tools and arms', hint: plotLevel(s, 'workshop') < PLOT_INFO.workshop.levels.length ? '−25 supplies · the workshop gains a level' : 'Already fully equipped' },
         { label: 'Buy a curiosity', hint: '−30 supplies · a special item' },
         { label: 'Decline', hint: 'Nothing happens' },
       ],
     }),
     resolve(s, o) {
-      if (o === 0 && s.supplies >= 20 && s.settlement.equipment < MAX_EQUIPMENT) {
-        s.supplies -= 20;
-        s.settlement.equipment++;
-        addLog(s, 'Good steel, a little rusted. Equipment improved.', 'good');
+      if (o === 0 && s.supplies >= 25 && plotLevel(s, 'workshop') < PLOT_INFO.workshop.levels.length) {
+        s.supplies -= 25;
+        raisePlot(s, 'workshop');
       } else if (o === 1 && s.supplies >= 30) {
         if (grantRandomSpecial(s, 'From the merchant: ')) s.supplies -= 30;
         else addLog(s, 'The merchant has nothing you have not already seen.');

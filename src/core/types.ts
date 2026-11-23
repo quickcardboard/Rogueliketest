@@ -1,12 +1,13 @@
 import type { RngState } from './rng';
 
 export type Role = 'villager' | 'militia' | 'archer' | 'scout' | 'builder';
-export type Labor = 'gather' | 'build' | 'scout' | 'guard';
+export type Labor = 'gather' | 'build' | 'scout' | 'drill';
 /** Militia, archers and scouts are military; villagers and builders are the economy. */
 export type Pool = 'military' | 'economy';
-export type HordeType = 'swarmer' | 'brute' | 'flier';
+export type HordeType = 'swarmer' | 'brute' | 'flier' | 'shade';
+export type Element = 'ember' | 'frost' | 'mire' | 'bloom';
 export type FeatureKind = 'forest' | 'regrowth' | 'ruins' | 'survivors' | 'nest' | 'blight' | 'strange';
-export type TaskKind = 'idle' | 'gather' | 'build' | 'scout' | 'guard' | 'hunt' | 'strike' | 'home' | 'train' | 'wounded';
+export type TaskKind = 'idle' | 'gather' | 'build' | 'scout' | 'drill' | 'hunt' | 'strike' | 'home' | 'train' | 'wounded';
 export type InnerBuilding = 'granary' | 'infirmary' | 'workshop' | 'hearth';
 export type SpecialId = 'cartographer' | 'tinderbox' | 'seedVault' | 'hearthstone' | 'lantern' | 'ironroot' | 'greenThumb' | 'warbanner';
 export type GiftId = 'cache' | 'newcomers' | 'veteran' | 'pathfinder' | 'masons' | 'forge';
@@ -71,6 +72,8 @@ export interface Colonist extends Vec {
   carry: number;
   timer: number;
   trainRole?: Role;
+  /** Drill experience; every 30 makes a veteran level (max 3). */
+  xp: number;
 }
 
 export interface HordeUnit extends Vec {
@@ -80,17 +83,34 @@ export interface HordeUnit extends Vec {
   px: number;
   py: number;
   /** roam: guards a nest. gather: warband forming. march/siege: assault. */
-  mode: 'roam' | 'gather' | 'march' | 'siege';
+  mode: 'roam' | 'gather' | 'march' | 'siege' | 'stalk';
+  /** Ring effects taken so far: 1 ember, 2 frost, 4 bloom; and the last ring entered. */
+  fx: number;
+  ring: number;
   nest: number;
   tx: number;
   ty: number;
 }
 
-export type ProjectSpec =
-  | { kind: 'wall' }
-  | { kind: 'tower' }
-  | { kind: 'inner'; building: InnerBuilding }
-  | { kind: 'equipment' };
+export type PlotKey = 'palisade' | 'granary' | 'infirmary' | 'workshop' | 'hearth' | 'barracks' | 'lodge' | 'towerNE' | 'towerNW' | 'towerSW' | 'towerSE';
+
+/** A fixed building site in the colony. */
+export interface Plot extends Vec {
+  key: PlotKey;
+  level: number;
+}
+
+export interface ProjectSpec {
+  plot: PlotKey;
+}
+
+/** A ring of the valley: arcs of elements that turn a step each midnight. */
+export interface Ring {
+  arcs: Element[];
+  /** How many arcs the ring has turned (counter-clockwise positive). */
+  offset: number;
+  dir: 1 | -1;
+}
 
 export interface Project {
   id: number;
@@ -119,6 +139,9 @@ export interface Directives {
 
 export interface Warband {
   units: number;
+  /** Where it gathers. */
+  sx: number;
+  sy: number;
   start: number;
   dir: number;
   killed: number;
@@ -168,6 +191,10 @@ export interface GameState {
   heart: Heart;
   nextId: number;
   settlement: Settlement;
+  plots: Plot[];
+  rings: Ring[];
+  /** What the colony knows of each arc, in ring-local order (null = unknown). */
+  ringIntel: (Element | null)[][];
   projects: Project[];
   training: Role[];
   /** Share of the military out scouting, and of the economy building (0–100). */

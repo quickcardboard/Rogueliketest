@@ -1,11 +1,10 @@
 import { chooseBoon, chooseEvent, fireStores, orderStrike, projectCost, queueProject, queueTraining, setBell, setSplit, step, strikeOdds } from '../src/core/sim';
-import type { GameState, ProjectSpec } from '../src/core/types';
+import type { GameState, PlotKey } from '../src/core/types';
 
-/** A simple player for headless balance runs: makes decisions every 6 hours. */
+/** The "just build everything" player: queues plots in a fixed order, never touches much else. */
 export function botDecide(s: GameState) {
   if (s.event) return chooseEvent(s, 0);
   if (s.boon) {
-    // Prefer relics, then fighters.
     const i = s.boon.findIndex((b) => b.kind === 'relic');
     return chooseBoon(s, i >= 0 ? i : 0);
   }
@@ -14,22 +13,12 @@ export function botDecide(s: GameState) {
     setBell(s, true);
     if (wb.interventions > 0) fireStores(s);
   }
-
-  const wants: ProjectSpec[] = [
-    { kind: 'inner', building: 'granary' },
-    { kind: 'wall' },
-    { kind: 'tower' },
-    { kind: 'equipment' },
-    { kind: 'inner', building: 'infirmary' },
-    { kind: 'inner', building: 'hearth' },
-    { kind: 'wall' },
-    { kind: 'equipment' },
-  ];
-  if (s.projects.length < 1) {
-    for (const w of wants) {
-      const c = projectCost(s, w);
-      if (typeof c !== 'string' && s.supplies >= c.supplies + 25) {
-        queueProject(s, w);
+  const order: PlotKey[] = ['granary', 'workshop', 'towerNE', 'palisade', 'infirmary', 'barracks', 'towerSW', 'hearth', 'workshop', 'towerNW', 'towerSE', 'palisade', 'lodge', 'granary', 'workshop', 'barracks'];
+  if (s.projects.length < 2) {
+    for (const plot of order) {
+      const c = projectCost(s, { plot });
+      if (typeof c !== 'string' && s.supplies >= c.supplies + 20) {
+        queueProject(s, { plot });
         break;
       }
     }
@@ -39,10 +28,8 @@ export function botDecide(s: GameState) {
     const a = s.colonists.filter((c) => c.role === 'archer').length;
     queueTraining(s, m <= a ? 'militia' : 'archer');
   }
-
   setSplit(s, 'scout', wb ? 10 : 35);
   setSplit(s, 'build', s.projects.length ? 45 : 10);
-
   const seen = s.heart.seen;
   if (seen && !seen.uncertain && s.time - seen.at < 24 && strikeOdds(s) >= 0.55 && !wb) orderStrike(s);
 }

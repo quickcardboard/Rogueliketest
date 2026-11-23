@@ -4,10 +4,7 @@ import {
   DAWN,
   DT,
   DUSK,
-  INNER_INFO,
-  MAX_EQUIPMENT,
-  MAX_TOWERS,
-  MAX_WALL,
+  PLOT_INFO,
   GIFT_INFO,
   POOL_OF,
   ROLE_INFO,
@@ -17,15 +14,15 @@ import {
   WALL_R,
 } from './data';
 import { maybeDailyEvent, resolveEvent } from './events';
-import { assaultDirection, stepHorde, threatRate } from './horde';
+import { assaultDirection, isWarband, stepHorde, threatRate } from './horde';
 import { chance, int, next, pick } from './rng';
-import { addLog, colonistPower, dayOf, grantSpecial, spawnColonist, wallMax } from './state';
-import type { Boon, Colonist, Directives, GameState, GiftId, Labor, Pool, ProjectSpec, Role, SpecialId } from './types';
-import { angleOf, dist, freshness, isNight, moveHeart, sectorName, shiftLand, updateVision } from './world';
+import { addLog, colonistPower, dayOf, grantSpecial, plotLevel, spawnColonist, wallMax } from './state';
+import type { Boon, Colonist, Directives, GameState, GiftId, Labor, PlotKey, Pool, ProjectSpec, Role, SpecialId } from './types';
+import { angleOf, dist, forecastRoute, freshness, isNight, moveHeart, sectorName, shiftLand, turnRings, updateVision } from './world';
 
 export { newGame, dayOf, clock } from './state';
 
-const interruptible = (c: Colonist) => c.task === 'idle' || c.task === 'guard' || c.task === 'build';
+const interruptible = (c: Colonist) => c.task === 'idle' || c.task === 'drill' || c.task === 'build';
 
 /** Who can be given a job right now. */
 const available = (c: Colonist) => c.task !== 'wounded' && c.task !== 'train' && c.task !== 'strike' && c.task !== 'hunt';
@@ -39,7 +36,7 @@ const BUILD_PREF: Record<Role, number> = { builder: 3, villager: 1, scout: 0, ar
  * People out in the field keep their job until they return.
  */
 export function allocateLabor(s: GameState) {
-  split(s, 'military', 'scout', 'guard', s.split.scout / 100, SCOUT_PREF);
+  split(s, 'military', 'scout', 'drill', s.split.scout / 100, SCOUT_PREF);
   split(s, 'economy', 'build', 'gather', s.split.build / 100, BUILD_PREF);
 }
 
@@ -71,7 +68,7 @@ function dispatchHunters(s: GameState) {
   if (!s.directives.hunt || s.warband || s.bell) return;
   if (s.threat > s.threshold * 0.75) return;
   if (isNight(s) && s.directives.curfew) return;
-  const guards = s.colonists.filter((c) => c.task === 'guard' && atHome(c) && isFighter(c));
+  const guards = s.colonists.filter((c) => c.task === 'drill' && atHome(c) && isFighter(c));
   if (guards.length < 2) return;
   let best: number | null = null;
   let bestD = Infinity;
@@ -96,7 +93,7 @@ function dispatchHunters(s: GameState) {
   }
   if (power < nest.amount * 2.2 || party.length < 2) return;
   for (const c of party) setTask(c, 'hunt', 'out', nest.x, nest.y, best);
-  addLog(s, `${party.length} guards set out to burn the ${sectorName(nest)} nest.`);
+  addLog(s, `${party.length} soldiers set out to burn the ${sectorName(nest)} nest.`);
 }
 
 function startTraining(s: GameState) {
@@ -111,35 +108,34 @@ function startTraining(s: GameState) {
   c.labor = null;
 }
 
+/** Applies a plot's new level to the settlement. */
+export function raisePlot(s: GameState, key: PlotKey) {
+  const plot = s.plots.find((p) => p.key === key)!;
+  plot.level++;
+  const st = s.settlement;
+  const info = PLOT_INFO[key];
+  switch (key) {
+    case 'palisade':
+      st.wallLevel = plot.level;
+      st.wallHp = st.wallHp.map(() => wallMax(s));
+      break;
+    case 'workshop':
+      st.equipment = plot.level;
+      break;
+    case 'granary':
+    case 'infirmary':
+    case 'hearth':
+      st.inner[key] = true;
+      break;
+  }
+  addLog(s, `${info.label}${info.levels.length > 1 ? ` (level ${plot.level})` : ''} finished: ${info.levels[plot.level - 1]}`, 'good');
+}
+
 function completeProjects(s: GameState) {
   const p = s.projects[0];
   if (!p || p.workLeft > 0) return;
   s.projects.shift();
-  const st = s.settlement;
-  switch (p.spec.kind) {
-    case 'wall':
-      st.wallLevel++;
-      st.wallHp = st.wallHp.map(() => wallMax(s));
-      addLog(s, `The palisade now stands at level ${st.wallLevel}.`, 'good');
-      break;
-    case 'tower': {
-      // Raise it facing the worst of it.
-      const known = s.heart.seen ?? Object.values(s.intel).find((i) => i.kind === 'nest') ?? { x: 1, y: 0 };
-      let a = angleOf(known);
-      for (let k = 0; k < 8 && st.towers.some((t) => Math.abs(((t - a + Math.PI * 3) % (Math.PI * 2)) - Math.PI) < 0.5); k++) a += Math.PI / 4;
-      st.towers.push(a);
-      addLog(s, `A watchtower rises on the ${sectorName({ x: Math.cos(a), y: -Math.sin(a) })} wall.`, 'good');
-      break;
-    }
-    case 'inner':
-      st.inner[p.spec.building] = true;
-      addLog(s, `The ${INNER_INFO[p.spec.building].label} is finished.`, 'good');
-      break;
-    case 'equipment':
-      st.equipment++;
-      addLog(s, `New arms and tools: equipment level ${st.equipment}.`, 'good');
-      break;
-  }
+  raisePlot(s, p.spec.plot);
 }
 
 function resolveStrike(s: GameState) {
@@ -180,7 +176,7 @@ export function step(s: GameState) {
   }
 
   // Upkeep.
-  const eat = s.colonists.length * (UPKEEP_PER_DAY / 24) * DT * (s.settlement.inner.granary ? 0.67 : 1);
+  const eat = s.colonists.length * (UPKEEP_PER_DAY / 24) * DT * [1, 0.75, 0.55][plotLevel(s, 'granary')]!;
   s.supplies += (s.specials.includes('seedVault') ? 6 / 24 : 0) * DT - eat;
   if (s.supplies < 0) {
     s.supplies = 0;
@@ -216,6 +212,7 @@ export function step(s: GameState) {
     s.heart.strength += 0.9 / 24;
   }
 
+  if (crossed(0)) for (const line of turnRings(s)) addLog(s, line, 'info');
   if (crossed(DUSK)) {
     if (s.directives.curfew) for (const c of s.colonists) if ((c.task === 'gather' || c.task === 'scout') && c.phase !== 'work') goHome(c);
     // The end of the day brings a choice.
@@ -223,7 +220,7 @@ export function step(s: GameState) {
   }
   if (crossed(DAWN)) {
     addLog(s, `Day ${dayOf(s.time)} dawns.`);
-    if (chance(s.rng, s.settlement.inner.hearth ? 0.35 : 0.06)) {
+    if (chance(s.rng, [0.06, 0.3, 0.55][plotLevel(s, 'hearth')]!)) {
       const n = int(s.rng, 1, 3);
       for (let i = 0; i < n; i++) spawnColonist(s, 'villager', (next(s.rng) - 0.5) * 4, (next(s.rng) - 0.5) * 4);
       s.stats.born += n;
@@ -279,7 +276,7 @@ export function setBell(s: GameState, on: boolean) {
 
 function rollBoons(s: GameState): Boon[] {
   const relics = (Object.keys(SPECIAL_INFO) as SpecialId[]).filter((x) => !s.specials.includes(x));
-  const gifts = (Object.keys(GIFT_INFO) as GiftId[]).filter((g) => g !== 'forge' || s.settlement.equipment < MAX_EQUIPMENT);
+  const gifts = (Object.keys(GIFT_INFO) as GiftId[]).filter((g) => g !== 'forge' || plotLevel(s, 'workshop') < PLOT_INFO.workshop.levels.length);
   const out: Boon[] = [];
   if (relics.length) out.push({ kind: 'relic', id: pick(s.rng, relics) });
   while (out.length < 3 && gifts.length) {
@@ -316,7 +313,7 @@ export function chooseBoon(s: GameState, i: number) {
       if (s.projects[0]) s.projects[0].workLeft -= 20;
       break;
     case 'forge':
-      s.settlement.equipment = Math.min(MAX_EQUIPMENT, s.settlement.equipment + 1);
+      if (plotLevel(s, 'workshop') < PLOT_INFO.workshop.levels.length) raisePlot(s, 'workshop');
       break;
   }
   addLog(s, `${GIFT_INFO[g].label}: ${GIFT_INFO[g].desc}`, 'good');
@@ -327,26 +324,12 @@ export function setDirective<K extends keyof Directives>(s: GameState, k: K, v: 
   s.directives[k] = v;
 }
 
-export function projectCost(s: GameState, spec: ProjectSpec): { supplies: number; work: number } | string {
-  const queued = (k: ProjectSpec['kind']) => s.projects.filter((p) => p.spec.kind === k).length;
-  const st = s.settlement;
-  switch (spec.kind) {
-    case 'wall': {
-      const lvl = st.wallLevel + queued('wall');
-      return lvl >= MAX_WALL ? 'The palisade is as tall as it gets.' : COSTS.wall(lvl);
-    }
-    case 'tower': {
-      const n = st.towers.length + queued('tower');
-      return n >= MAX_TOWERS ? 'There are towers on every side already.' : COSTS.tower(n);
-    }
-    case 'inner':
-      if (st.inner[spec.building] || s.projects.some((p) => p.spec.kind === 'inner' && p.spec.building === spec.building)) return 'Already built.';
-      return COSTS.inner;
-    case 'equipment': {
-      const lvl = st.equipment + queued('equipment');
-      return lvl >= MAX_EQUIPMENT ? 'Equipment is at its best.' : COSTS.equipment(lvl, st.inner.workshop);
-    }
-  }
+/** Cost of the next level of a plot, counting levels already queued; or why it cannot be built. */
+export function projectCost(s: GameState, spec: ProjectSpec): { supplies: number; work: number; level: number } | string {
+  const info = PLOT_INFO[spec.plot];
+  const level = plotLevel(s, spec.plot) + s.projects.filter((p) => p.spec.plot === spec.plot).length;
+  if (level >= info.levels.length) return 'Fully built.';
+  return { ...info.cost[level]!, level: level + 1 };
 }
 
 export function queueProject(s: GameState, spec: ProjectSpec): string | null {
@@ -359,13 +342,27 @@ export function queueProject(s: GameState, spec: ProjectSpec): string | null {
   return null;
 }
 
+/** Cancels a queued project (and any later levels of the same plot), refunding half. */
 export function cancelProject(s: GameState, id: number): string | null {
-  const p = s.projects.find((x) => x.id === id);
-  if (!p) return 'No such project.';
-  s.projects = s.projects.filter((x) => x !== p);
-  const c = projectCost(s, p.spec);
-  if (typeof c !== 'string') s.supplies += Math.floor(c.supplies / 2);
+  const i = s.projects.findIndex((x) => x.id === id);
+  if (i < 0) return 'No such project.';
+  const plot = s.projects[i]!.spec.plot;
+  const drop = s.projects.filter((p, j) => j >= i && p.spec.plot === plot);
+  for (const p of drop) {
+    const lvl = plotLevel(s, plot) + s.projects.filter((q) => q.spec.plot === plot).indexOf(p);
+    s.supplies += Math.floor(PLOT_INFO[plot].cost[lvl]!.supplies / 2);
+  }
+  s.projects = s.projects.filter((p) => !drop.includes(p));
   return null;
+}
+
+/** Moves a project one place earlier in the queue (levels of one plot keep their order). */
+export function hurryProject(s: GameState, id: number) {
+  const i = s.projects.findIndex((x) => x.id === id);
+  if (i <= 0) return;
+  const prev = s.projects[i - 1]!;
+  if (prev.spec.plot === s.projects[i]!.spec.plot) return;
+  [s.projects[i - 1], s.projects[i]] = [s.projects[i]!, prev];
 }
 
 export function queueTraining(s: GameState, role: Role): string | null {
@@ -423,7 +420,7 @@ export function fireStores(s: GameState): string | null {
   if (!free) s.supplies -= 15;
   let hit = 0;
   for (const u of s.horde)
-    if (u.mode !== 'roam' && dist(u) < WALL_R + 10) {
+    if (isWarband(u) && dist(u) < WALL_R + 10) {
       u.hp -= 3;
       hit++;
     }
@@ -449,7 +446,7 @@ export function forecast(s: GameState): Forecast {
   const wb = s.warband;
   if (wb) {
     const dir = assaultDirection(s);
-    if (wb.marching && dir) return { text: `Warband attacking from the ${dir}`, detail: `${s.horde.filter((u) => u.mode !== 'roam').length} remain`, urgent: true };
+    if (wb.marching && dir) return { text: `Warband attacking from the ${dir}`, detail: `${s.horde.filter(isWarband).length} remain`, urgent: true };
     if (wb.announced) return { text: `Warband gathering in the ${SEGMENT_NAMES[wb.dir]}`, detail: wb.marching ? 'It is on the move.' : 'It will march soon.', urgent: true };
   }
   const { rate } = threatRate(s);
@@ -467,6 +464,11 @@ export function forecast(s: GameState): Forecast {
   };
 }
 
+/** The rings a warband would cross marching straight in from a point, as the colony knows them. */
+export function routeFrom(s: GameState, p: { x: number; y: number }) {
+  return forecastRoute(s, angleOf(p), dist(p));
+}
+
 export function roleCounts(s: GameState): Record<Role, number> {
   const out: Record<Role, number> = { villager: 0, militia: 0, archer: 0, scout: 0, builder: 0 };
   for (const c of s.colonists) out[c.task === 'train' && c.trainRole ? c.role : c.role]++;
@@ -475,7 +477,7 @@ export function roleCounts(s: GameState): Record<Role, number> {
 
 /** What people are doing right now. */
 export function jobCounts(s: GameState) {
-  const out = { gather: 0, build: 0, scout: 0, guard: 0, hunt: 0, strike: 0, wounded: 0, train: 0, military: 0, economy: 0 };
+  const out = { gather: 0, build: 0, scout: 0, drill: 0, hunt: 0, strike: 0, wounded: 0, train: 0, military: 0, economy: 0 };
   for (const c of s.colonists) {
     if (c.task === 'hunt') out.hunt++;
     else if (c.task === 'strike') out.strike++;

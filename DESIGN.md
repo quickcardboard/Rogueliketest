@@ -22,6 +22,15 @@ Playtest feedback on the turn-based Phase 0: the setting, the moving enemies and
 - **The bell** is a toggle: everyone drops their work and garrisons the walls; villagers are much weaker fighters than soldiers. It falls silent by itself when the warband is broken. Without it, only soldiers fight and the untrained shelter in the keep.
 - **End of each day:** a choice of three blessings, one relic (permanent) and two gifts (immediate).
 
+**Third playtest revision [Decided]:**
+- Problem: one strategy (max the buildings, ignore the sliders) always won; all buildings were done in week one; scouts were redundant.
+- **Elemental rings.** Three concentric rings of six arcs circle the colony (Ember, Frost, Mire, Bloom). They turn one step each midnight, in the dark; sometimes a ring lurches, reverses and swaps arcs. Warbands march straight in from their nest and take on the element of every arc they cross. Scouting the arcs and the nests lets you forecast a warband's route and what it will become; the map draws the route and the Rings menu lists it.
+- **Night stalkers** hunt anyone outside the walls after dark, so working through the night has a real cost.
+- **Building plots, Thronefall-style.** Fixed plots in the colony (palisade, four towers, granary, infirmary, workshop, hearth, barracks, scouts' lodge), each with 2–3 levels; the player only chooses what to queue and in what order. 24 levels in all; a build-everything player finishes about a third by day 7.
+- **Military slider is Drill vs Scout.** Drilling soldiers gain veterancy; sliders now fill from the side with the larger share.
+- **UI:** full-screen map (drag, pinch/scroll zoom), floating HUD, a bottom toolbar (Orders, Build, People, Rings, Log, Bell) that opens sheets.
+- **Next:** cleansing and anchoring a ring to expand the colony, unlocking stronger buildings and units.
+
 Sections below describe the original design; where they conflict with this section, this section wins.
 
 ## 1. Pitch

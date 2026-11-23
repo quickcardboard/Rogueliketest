@@ -1,6 +1,6 @@
-import { FOG_N, KEEP_HP, NAMES, ROLE_INFO, SEGMENTS, SPECIAL_INFO, WALL_HP } from './data';
+import { ARCS, FOG_N, KEEP_HP, NAMES, PLOT_INFO, RINGS, ROLE_INFO, SEGMENTS, SPECIAL_INFO, WALL_HP } from './data';
 import { int, makeRng, pick } from './rng';
-import type { Colonist, GameState, Role, SpecialId } from './types';
+import type { Colonist, Element, GameState, PlotKey, Role, SpecialId } from './types';
 import { generateWorld, updateVision } from './world';
 
 export function dayOf(t: number) {
@@ -37,6 +37,7 @@ export function spawnColonist(s: GameState, role: Role, x = 0, y = 0): Colonist 
     target: -1,
     carry: 0,
     timer: 0,
+    xp: 0,
   };
   s.colonists.push(c);
   return c;
@@ -47,9 +48,24 @@ export function wallMax(s: GameState): number {
   return s.settlement.wallLevel * WALL_HP * (s.specials.includes('ironroot') ? 1.4 : 1);
 }
 
-/** Fighting power of one colonist, used for nests and the heart. */
+export function plotLevel(s: GameState, key: PlotKey): number {
+  return s.plots.find((p) => p.key === key)?.level ?? 0;
+}
+
+/** Veteran level from drilling, 0–3. */
+export function veterancy(c: Colonist): number {
+  return Math.min(3, Math.floor(c.xp / 30));
+}
+
+export function maxHp(s: GameState, c: Colonist): number {
+  const hardy = plotLevel(s, 'barracks') >= 2 && (c.role === 'militia' || c.role === 'archer' || c.role === 'scout') ? 1 : 0;
+  return ROLE_INFO[c.role].hp + hardy;
+}
+
+/** Fighting power of one colonist: role, arms, veterancy and relics. */
 export function colonistPower(s: GameState, c: Colonist): number {
-  return ROLE_INFO[c.role].dps * (1 + 0.2 * s.settlement.equipment);
+  const soldier = c.role === 'militia' || c.role === 'archer' || c.role === 'scout';
+  return ROLE_INFO[c.role].dps * (1 + 0.2 * s.settlement.equipment) * (1 + 0.15 * veterancy(c)) * (soldier && s.specials.includes('warbanner') ? 1.2 : 1);
 }
 
 export function grantSpecial(s: GameState, id: SpecialId, prefix = 'Found: ') {
@@ -90,6 +106,12 @@ export function newGame(seed: number): GameState {
       keepHp: KEEP_HP,
     },
     projects: [],
+    plots: (Object.keys(PLOT_INFO) as PlotKey[]).map((key) => {
+      const i = PLOT_INFO[key];
+      return { key, level: key === 'palisade' ? 1 : 0, x: Math.cos(i.angle) * i.r, y: -Math.sin(i.angle) * i.r };
+    }),
+    rings: [],
+    ringIntel: [],
     training: [],
     split: { scout: 40, build: 40 },
     bell: false,
@@ -111,6 +133,18 @@ export function newGame(seed: number): GameState {
     dirtyLabor: true,
   };
   s.threshold = 34 + int(s.rng, 0, 8);
+  // Each ring gets a mix of elements, never three of a kind in a row.
+  const els: Element[] = ['ember', 'frost', 'mire', 'bloom'];
+  for (let k = 0; k < RINGS.length; k++) {
+    const arcs: Element[] = [];
+    for (let a = 0; a < ARCS; a++) {
+      let e = pick(s.rng, els);
+      while (a >= 2 && arcs[a - 1] === e && arcs[a - 2] === e) e = pick(s.rng, els);
+      arcs.push(e);
+    }
+    s.rings.push({ arcs, offset: int(s.rng, 0, ARCS - 1), dir: k % 2 ? -1 : 1 });
+    s.ringIntel.push(new Array(ARCS).fill(null));
+  }
   generateWorld(s);
   const start: Role[] = ['villager', 'villager', 'villager', 'villager', 'villager', 'villager', 'villager', 'villager', 'militia', 'militia', 'militia', 'archer', 'archer', 'scout', 'scout', 'builder'];
   for (const r of start) spawnColonist(s, r);

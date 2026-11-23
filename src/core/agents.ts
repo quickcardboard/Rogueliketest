@@ -1,7 +1,7 @@
 import { DT, HOME_R, POOL_OF, SEGMENTS, ROLE_INFO, ROLE_VS, WALL_R, WORLD_R, WOUND_HOURS } from './data';
 import { triggerStrangeEvent } from './events';
 import { chance, next } from './rng';
-import { addLog, colonistPower, grantRandomSpecial, spawnColonist, wallMax } from './state';
+import { addLog, colonistPower, grantRandomSpecial, maxHp, plotLevel, spawnColonist, veterancy, wallMax } from './state';
 import type { Colonist, Feature, GameState, HordeUnit, Vec } from './types';
 import { angleOf, dist, fogIndex, isNight, len, sectorName } from './world';
 
@@ -66,7 +66,7 @@ export function goHome(c: Colonist) {
 }
 
 function speedOf(s: GameState, c: Colonist): number {
-  return ROLE_INFO[c.role].speed * (c.carry > 0 ? 0.85 : 1) * (isNight(s) ? 0.8 : 1);
+  return ROLE_INFO[c.role].speed * (c.role === 'scout' && plotLevel(s, 'lodge') > 0 ? 1.15 : 1) * (c.carry > 0 ? 0.85 : 1) * (isNight(s) ? 0.8 : 1);
 }
 
 function feature(s: GameState, id: number): Feature | undefined {
@@ -77,7 +77,7 @@ function feature(s: GameState, id: number): Feature | undefined {
 export function hurt(s: GameState, c: Colonist, dmg: number): boolean {
   c.hp -= dmg;
   if (c.hp > 0) return false;
-  const survive = s.settlement.inner.infirmary ? 0.6 : 0.4;
+  const survive = [0.4, 0.6, 0.72][plotLevel(s, 'infirmary')]!;
   if (chance(s.rng, survive)) {
     c.hp = 1;
     setTask(c, 'wounded', 'walk');
@@ -111,7 +111,7 @@ function nearestHorde(s: GameState, p: Vec, range: number, pred?: (u: HordeUnit)
 export function assaultNear(s: GameState): Vec | null {
   if (!s.warband?.marching) return null;
   let best: HordeUnit | null = null;
-  for (const u of s.horde) if (u.mode !== 'roam' && u.hp > 0 && (!best || dist(u) < dist(best))) best = u;
+  for (const u of s.horde) if ((u.mode === 'march' || u.mode === 'siege') && u.hp > 0 && (!best || dist(u) < dist(best))) best = u;
   return best && dist(best) < 45 ? best : null;
 }
 
@@ -172,10 +172,11 @@ function pickScoutTarget(s: GameState, c: Colonist): Vec & { target: number } {
 export function startLabor(s: GameState, c: Colonist) {
   const night = isNight(s) && s.directives.curfew;
   switch (c.labor) {
-    case 'guard': {
-      const a = ((c.id * 1.7) % (Math.PI * 2));
-      const w = wallSpot(c, a, 0.8);
-      return setTask(c, 'guard', '', w.x, w.y);
+    case 'drill': {
+      // Drill in the yard by the barracks.
+      const b = s.plots.find((p) => p.key === 'barracks')!;
+      const a = c.id * 2.4;
+      return setTask(c, 'drill', '', b.x + Math.cos(a) * 2.5, b.y + Math.sin(a) * 2.5);
     }
     case 'build': {
       if (s.projects.length) return setTask(c, 'build', '', (next(s.rng) - 0.5) * 6, (next(s.rng) - 0.5) * 6);
@@ -232,10 +233,10 @@ export function stepColonist(s: GameState, c: Colonist) {
         if (moveTo(c, h.x, h.y, spd * 0.6)) c.phase = 'rest';
         return;
       }
-      const rate = (s.settlement.inner.infirmary ? 2 : 1) * (s.specials.includes('hearthstone') ? 2 : 1);
+      const rate = (1 + plotLevel(s, 'infirmary')) * (s.specials.includes('hearthstone') ? 2 : 1);
       c.timer -= DT * rate;
       if (c.timer <= 0) {
-        c.hp = ROLE_INFO[c.role].hp;
+        c.hp = maxHp(s, c);
         setTask(c, 'idle');
       }
       return;
@@ -245,7 +246,7 @@ export function stepColonist(s: GameState, c: Colonist) {
       moveTo(c, 0, 0, spd);
       if (c.timer <= 0) {
         c.role = c.trainRole ?? c.role;
-        c.hp = ROLE_INFO[c.role].hp;
+        c.hp = maxHp(s, c);
         c.labor = null;
         setTask(c, 'idle');
         addLog(s, `${c.name} finished training as one of the ${ROLE_INFO[c.role].label.toLowerCase()}.`);
@@ -259,7 +260,7 @@ export function stepColonist(s: GameState, c: Colonist) {
       return;
     }
     case 'idle':
-    case 'guard':
+    case 'drill':
     case 'build': {
       if (assault || s.bell) return defend(s, c, assault);
       if (c.task === 'idle') {
@@ -277,7 +278,12 @@ export function stepColonist(s: GameState, c: Colonist) {
         }
         return;
       }
-      moveTo(c, c.tx, c.ty, spd);
+      // Drilling.
+      if (moveTo(c, c.tx, c.ty, spd)) {
+        const before = veterancy(c);
+        c.xp += DT * (1 + plotLevel(s, 'barracks'));
+        if (veterancy(c) > before) addLog(s, `${c.name} has become a veteran (level ${veterancy(c)}).`, 'good');
+      }
       return;
     }
     case 'gather':
@@ -473,12 +479,12 @@ export function colonistAttacks(s: GameState) {
     if (!onWall && !isFighter(c) && c.task !== 'hunt' && c.task !== 'strike') continue;
     const u = nearestHorde(s, c, range);
     if (!u) continue;
-    const dmg = info.dps * ROLE_VS[c.role][u.type] * (1 + 0.2 * s.settlement.equipment) * (POOL_OF[c.role] === 'military' && s.specials.includes('warbanner') ? 1.2 : 1) * (onWall ? 1.15 : 1) * DT;
+    const dmg = colonistPower(s, c) * ROLE_VS[c.role][u.type] * (onWall ? 1.15 : 1) * DT;
     u.hp -= dmg;
   }
-  for (const a of s.settlement.towers) {
-    const p = { x: Math.cos(a) * WALL_R, y: -Math.sin(a) * WALL_R };
-    const u = nearestHorde(s, p, 22);
-    if (u) u.hp -= 2.5 * DT;
+  for (const p of s.plots) {
+    if (!p.key.startsWith('tower') || p.level === 0) continue;
+    const u = nearestHorde(s, p, 18 + p.level * 5);
+    if (u) u.hp -= (1.5 + p.level * 1.5) * DT;
   }
 }

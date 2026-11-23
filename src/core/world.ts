@@ -1,6 +1,7 @@
-import { FOG_CELL, FOG_N, ROLE_INFO, SEGMENTS, SEGMENT_NAMES, WALL_R, WORLD_R } from './data';
+import { ARCS, FOG_CELL, FOG_N, RINGS, ROLE_INFO, SEGMENTS, SEGMENT_NAMES, WALL_R, WORLD_R } from './data';
 import { chance, int, next, pick, type RngState } from './rng';
-import type { Feature, FeatureKind, GameState, HordeType, Vec } from './types';
+import type { Element, Feature, FeatureKind, GameState, HordeType, Vec } from './types';
+import { plotLevel } from './state';
 
 export const len = (x: number, y: number) => Math.sqrt(x * x + y * y);
 export const dist = (a: Vec, b: Vec = { x: 0, y: 0 }) => len(a.x - b.x, a.y - b.y);
@@ -116,11 +117,79 @@ function sightOf(s: GameState, base: number): number {
   return base * (s.specials.includes('cartographer') ? 1.4 : 1) * (isNight(s) ? 0.6 : 1);
 }
 
+// ───────────── Rings ─────────────
+
+/** Which ring a point lies in (0 = innermost), or -1. */
+export function ringAt(p: Vec): number {
+  const d = dist(p);
+  return RINGS.findIndex((r) => d >= r.inner && d < r.outer);
+}
+
+const ARC = (Math.PI * 2) / ARCS;
+const norm = (a: number) => ((a % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2);
+
+/** The ring-local arc under a world angle. */
+export function arcAtAngle(s: GameState, k: number, angle: number): number {
+  return Math.floor(norm(angle - s.rings[k]!.offset * ARC) / ARC) % ARCS;
+}
+
+/** World angle where a ring-local arc starts. */
+export function arcStart(s: GameState, k: number, arc: number): number {
+  return norm(arc * ARC + s.rings[k]!.offset * ARC);
+}
+
+export function elementAt(s: GameState, p: Vec): Element | null {
+  const k = ringAt(p);
+  if (k < 0) return null;
+  return s.rings[k]!.arcs[arcAtAngle(s, k, angleOf(p))]!;
+}
+
+/** What the colony believes lies along a straight approach at this angle, ring by ring (outermost first). */
+export function forecastRoute(s: GameState, angle: number, from = WORLD_R): { ring: number; element: Element | null }[] {
+  const out: { ring: number; element: Element | null }[] = [];
+  for (let k = RINGS.length - 1; k >= 0; k--) {
+    if (RINGS[k]!.inner >= from) continue;
+    out.push({ ring: k, element: s.ringIntel[k]![arcAtAngle(s, k, angle)] ?? null });
+  }
+  return out;
+}
+
+/** Midnight: each ring turns one arc. Sometimes a ring lurches and reverses. Returns log lines. */
+export function turnRings(s: GameState): string[] {
+  const lines: string[] = [];
+  s.rings.forEach((ring, k) => {
+    if (chance(s.rng, 0.12)) {
+      ring.dir = ring.dir === 1 ? -1 : 1;
+      const a = int(s.rng, 0, ARCS - 1);
+      const b = (a + int(s.rng, 1, ARCS - 1)) % ARCS;
+      [ring.arcs[a], ring.arcs[b]] = [ring.arcs[b]!, ring.arcs[a]!];
+      s.ringIntel[k]![a] = null;
+      s.ringIntel[k]![b] = null;
+      lines.push(`The ${RINGS[k]!.name.toLowerCase()} groaned in the dark and turned against itself. Some of what we knew of it is wrong now.`);
+    }
+    ring.offset = (ring.offset + ring.dir + ARCS) % ARCS;
+  });
+  return lines;
+}
+
+/** Notes the element of any arc an eye can see. */
+function seeRings(s: GameState, x: number, y: number, r: number) {
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 8) * Math.PI * 2;
+    const p = i === 8 ? { x, y } : { x: x + Math.cos(a) * r * 0.85, y: y + Math.sin(a) * r * 0.85 };
+    const k = ringAt(p);
+    if (k >= 0) s.ringIntel[k]![arcAtAngle(s, k, angleOf(p))] = s.rings[k]!.arcs[arcAtAngle(s, k, angleOf(p))]!;
+  }
+}
+
 /** Reveals everything within sight of colonists, the colony and towers. */
 export function updateVision(s: GameState) {
-  const eyes: { x: number; y: number; r: number }[] = [{ x: 0, y: 0, r: sightOf(s, 18) }];
-  for (const a of s.settlement.towers) eyes.push({ x: Math.cos(a) * WALL_R, y: -Math.sin(a) * WALL_R, r: sightOf(s, 30) });
-  for (const c of s.colonists) if (c.task !== 'wounded') eyes.push({ x: c.x, y: c.y, r: sightOf(s, ROLE_INFO[c.role].sight) });
+  const eyes: { x: number; y: number; r: number }[] = [{ x: 0, y: 0, r: sightOf(s, 22) }];
+  for (const p of s.plots) if (p.key.startsWith('tower') && p.level > 0) eyes.push({ x: p.x, y: p.y, r: sightOf(s, 26 + p.level * 6) });
+  const lodge = plotLevel(s, 'lodge');
+  for (const c of s.colonists) if (c.task !== 'wounded') eyes.push({ x: c.x, y: c.y, r: sightOf(s, ROLE_INFO[c.role].sight * (c.role === 'scout' ? 1 + 0.3 * lodge : 1)) });
+  for (const e of eyes) seeRings(s, e.x, e.y, e.r);
+  if (lodge >= 2) for (const c of s.colonists) if (c.role === 'scout' && c.task !== 'wounded') seeRings(s, c.x, c.y, ROLE_INFO.scout.sight * 2.5);
 
   for (const e of eyes) {
     const span = Math.ceil(e.r / FOG_CELL);
