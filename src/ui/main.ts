@@ -1,13 +1,14 @@
-import { COSTS, DT, FEATURE_INFO, INNER_INFO, LABOR_INFO, MAX_EQUIPMENT, MAX_TOWERS, MAX_WALL, ROLE_INFO, SPECIAL_INFO, WALL_HP, WALL_R } from '../core/data';
+import { COSTS, DT, FEATURE_INFO, GIFT_INFO, INNER_INFO, MAX_EQUIPMENT, MAX_TOWERS, MAX_WALL, ROLE_INFO, SPECIAL_INFO, WALL_R } from '../core/data';
 import {
   cancelProject,
   cancelTraining,
+  chooseBoon,
   chooseEvent,
   clock,
   dayOf,
+  fireStores,
   forecast,
-  intervene,
-  laborCounts,
+  jobCounts,
   newGame,
   orderStrike,
   projectCost,
@@ -15,17 +16,19 @@ import {
   queueTraining,
   recallStrike,
   roleCounts,
+  setBell,
   setDirective,
-  setLabor,
+  setSplit,
   step,
   strikeOdds,
   strikeParty,
 } from '../core/sim';
-import type { GameState, InnerBuilding, Labor, ProjectSpec, Role, Vec } from '../core/types';
+import type { GameState, GiftId, InnerBuilding, ProjectSpec, Role, SpecialId, Vec } from '../core/types';
 import { dist, sectorName } from '../core/world';
+import { wallMax } from '../core/state';
 import { MapView } from './render';
 
-const SAVE_KEY = 'holdfast-sim-v1';
+const SAVE_KEY = 'holdfast-sim-v2';
 const HELP_KEY = 'holdfast-sim-help';
 /** Real seconds per in-game day at 1×. */
 const SECONDS_PER_DAY = 40;
@@ -123,18 +126,18 @@ function hudHtml() {
     <button class="small" data-act="help" aria-label="How to play">?</button>`;
 }
 
-function slider(l: Labor, counts: Record<Labor, number>, total: number) {
-  const v = s.labor[l];
-  return `<div class="slider">
-    <div class="row"><b>${LABOR_INFO[l].label}</b><span class="hint grow">${LABOR_INFO[l].desc}</span><span class="count" title="People on this job">${counts[l]}</span></div>
-    <input type="range" id="labor-${l}" min="0" max="100" step="5" value="${v}" data-labor="${l}" aria-label="${LABOR_INFO[l].label} priority">
-    <div class="hint">${pct(total ? v / total : 0)} of the workforce</div>
+function splitSlider(which: 'scout' | 'build', left: string, right: string, nLeft: number, nRight: number, extra: string) {
+  return `<div class="split ${s.bell ? 'paused' : ''}">
+    ${s.bell ? '<p class="hint info">On hold while the bell rings. Everyone is on the walls.</p>' : ''}
+    <div class="ends"><span><b>${nLeft}</b> ${left}</span><span>${right} <b>${nRight}</b></span></div>
+    <input type="range" id="split-${which}" min="0" max="100" step="5" value="${s.split[which]}" data-split="${which}" aria-label="${left} or ${right}">
+    ${extra}
   </div>`;
 }
 
 function ordersPanel() {
-  const counts = laborCounts(s);
-  const total = (Object.keys(s.labor) as Labor[]).reduce((n, l) => n + s.labor[l], 0);
+  const j = jobCounts(s);
+  const rc = roleCounts(s);
   const wb = s.warband;
   const striking = s.colonists.filter((c) => c.task === 'strike');
   const party = strikeParty(s);
@@ -157,29 +160,41 @@ function ordersPanel() {
           : `<button class="danger" data-act="strike" ${party.length ? '' : 'disabled'}>Strike the heart · ${pct(odds)}</button>`
       }`;
   }
+  const away = [j.hunt ? `${j.hunt} hunting a nest` : '', j.strike ? `${j.strike} on the strike` : '', j.wounded ? `${j.wounded} wounded` : '', j.train ? `${j.train} training` : '']
+    .filter(Boolean)
+    .join(' · ');
+  const fireFree = s.specials.includes('tinderbox');
   return `
-    ${
-      wb?.marching
-        ? `<div class="card urgent"><h3>Under attack</h3>
-          <div class="row"><button data-act="bell" ${wb.interventions ? '' : 'disabled'}>Ring the bell</button><span class="hint grow">Recall everyone in the fields; defenders fight harder for 3 hours.</span></div>
-          <div class="row"><button data-act="fire" ${wb.interventions && s.supplies >= 15 ? '' : 'disabled'}>Fire the stores</button><span class="hint grow">Burn 15 supplies to scorch the horde at the walls.</span></div>
-          <div class="hint">${wb.interventions} intervention${wb.interventions === 1 ? '' : 's'} left.</div></div>`
-        : ''
-    }
-    <div class="card"><h3>Labor</h3>
-      <p class="hint">Set priorities. People choose jobs that suit their training and finish their trips before switching.</p>
-      ${(Object.keys(LABOR_INFO) as Labor[]).map((l) => slider(l, counts, total)).join('')}
+    <div class="card bell ${s.bell ? 'ringing' : ''} ${wb?.marching ? 'urgent' : ''}">
+      <h3>${wb?.marching ? 'Under attack' : 'The bell'}</h3>
+      ${
+        s.bell
+          ? `<p>The bell is ringing. <b>Everyone</b> is on the walls; no work is being done.</p>
+             <button data-act="bell" data-v="0">Silence the bell</button>`
+          : `<p class="hint">Ring it and everyone drops their work to garrison the walls. Villagers fight far worse than soldiers. It falls silent when the warband is broken.</p>
+             <button class="${wb?.marching ? 'danger' : ''}" data-act="bell" data-v="1">Ring the bell</button>`
+      }
+      ${
+        wb?.marching
+          ? `<div class="row"><button data-act="fire" ${wb.interventions && (fireFree || s.supplies >= 15) ? '' : 'disabled'}>Fire the stores</button><span class="hint grow">${fireFree ? 'Free with the Tinderbox' : 'Burn 15 supplies'} to scorch the horde at the walls. ${wb.interventions} left.</span></div>`
+          : ''
+      }
     </div>
-    <div class="card"><h3>Directives</h3>
-      <div class="row"><span class="grow">At nightfall</span>
+    <div class="card"><h3>Military · ${rc.militia + rc.archer + rc.scout}</h3>
+      <p class="hint">Militia, archers and scouts. Scouts go first into the fog; everyone else holds the walls.</p>
+      ${splitSlider('scout', 'guarding', 'scouting', j.guard, j.scout, `
+        <div class="row"><span class="grow">When it is quiet, guards</span>
+          <button class="small ${s.directives.hunt ? 'on' : ''}" data-act="hunt" data-v="1">Hunt nests</button>
+          <button class="small ${!s.directives.hunt ? 'on' : ''}" data-act="hunt" data-v="0">Stay home</button></div>`)}
+    </div>
+    <div class="card"><h3>Economy · ${rc.villager + rc.builder}</h3>
+      <p class="hint">Villagers and builders. Builders go first to construction; with nothing to build they mend walls or gather.</p>
+      ${splitSlider('build', 'gathering', 'building', j.gather, j.build, '')}
+      <div class="row"><span class="grow">At nightfall, workers</span>
         <button class="small ${s.directives.curfew ? 'on' : ''}" data-act="curfew" data-v="1">Come home</button>
         <button class="small ${!s.directives.curfew ? 'on' : ''}" data-act="curfew" data-v="0">Work on</button></div>
-      <div class="hint">Working through the night is slower and riskier, and fewer are home if the horde comes.</div>
-      <div class="row"><span class="grow">In an assault, the untrained</span>
-        <button class="small ${s.directives.stance === 'walls' ? 'on' : ''}" data-act="stance" data-v="walls">Man the walls</button>
-        <button class="small ${s.directives.stance === 'shelter' ? 'on' : ''}" data-act="stance" data-v="shelter">Shelter</button></div>
-      <div class="hint">Sheltering saves lives, but the walls take more damage.</div>
     </div>
+    ${away ? `<p class="hint">Also: ${away}.</p>` : ''}
     <div class="card"><h3>The heart</h3>${heart}</div>`;
 }
 
@@ -207,7 +222,7 @@ function projectName(p: ProjectSpec) {
 
 function buildPanel() {
   const st = s.settlement;
-  const builders = laborCounts(s).build;
+  const builders = jobCounts(s).build;
   const q = s.projects.length
     ? s.projects
         .map(
@@ -215,9 +230,9 @@ function buildPanel() {
             <span class="bar"><span style="width:${pct(1 - Math.max(0, p.workLeft) / p.workTotal)}"></span></span></span>
             <button class="small" data-act="cancel" data-id="${p.id}" aria-label="Cancel">✕</button></div>`,
         )
-        .join('') + (builders ? '' : '<p class="hint bad">Nobody is assigned to Build. Raise the Build slider in Orders.</p>')
+        .join('') + (builders ? '' : '<p class="hint bad">Nobody is building. Move the Economy slider toward building in Orders.</p>')
     : '<p class="hint">Nothing under construction. Builders mend the walls when idle.</p>';
-  const damaged = st.wallHp.filter((h) => h < st.wallLevel * WALL_HP).length;
+  const damaged = st.wallHp.filter((h) => h < wallMax(s) - 0.5).length;
   return `
     <div class="card"><h3>Under construction</h3>${q}</div>
     <div class="card"><h3>Defenses</h3>
@@ -282,6 +297,15 @@ function modalHtml(): string {
     return `<div class="modal-bg"><div class="modal"><h3>${s.outcome === 'won' ? 'The siege is broken' : 'The light goes out'}</h3><p>${s.outcomeText}</p>
       <p class="hint">Seed ${s.seed} · ${dayOf(s.time)} days · ${s.assaults} assaults weathered · ${s.stats.died} lost.</p>
       <div class="opts"><button class="primary" data-act="new">Begin again</button></div></div></div>`;
+  if (s.boon)
+    return `<div class="modal-bg"><div class="modal"><h3>Day ${dayOf(s.time)} draws to a close</h3>
+      <p class="hint">Choose one blessing for the colony.</p>
+      <div class="opts boons">${s.boon
+        .map((b, i) => {
+          const info = b.kind === 'relic' ? SPECIAL_INFO[b.id as SpecialId] : GIFT_INFO[b.id as GiftId];
+          return `<button data-act="boon" data-i="${i}"><span class="kind">${b.kind === 'relic' ? 'Relic · lasts the whole run' : 'Gift · now'}</span><b>${info.label}</b><span class="hint">${info.desc}</span></button>`;
+        })
+        .join('')}</div></div></div>`;
   if (s.event)
     return `<div class="modal-bg"><div class="modal"><h3>${s.event.title}</h3><p>${s.event.text}</p>
       <div class="opts">${s.event.options.map((o, i) => `<button data-act="event" data-i="${i}">${o.label}<br><span class="hint">${o.hint}</span></button>`).join('')}</div></div></div>`;
@@ -292,10 +316,12 @@ function modalHtml(): string {
     return `<div class="modal-bg"><div class="modal help"><h3>Holdfast</h3>
       <p>The valley is changing. A heart of blight is growing toward your colony from somewhere in the fog. Find it and break it before it arrives.</p>
       <ul>
-        <li>Your people run their own lives. You set <b>priorities</b> with the labor sliders, and they choose their jobs.</li>
+        <li>Your people run their own lives. Two sliders set the balance: the <b>military</b> guards or scouts, the <b>economy</b> gathers or builds.</li>
+        <li>Ring the <b>bell</b> and everyone drops their work to defend the walls.</li>
         <li><b>Scouts</b> push back the fog. What you saw fades when the land shifts, so keep looking.</li>
         <li><b>Warbands</b> gather near nests, then march. Only people at home defend the walls.</li>
-        <li><b>Hunters</b> burn out nests, which heals the land and weakens the heart.</li>
+        <li>When it is quiet, guards <b>hunt nests</b>, which heals the land and weakens the heart.</li>
+        <li>Each evening, choose a <b>relic or gift</b>.</li>
         <li>Queue construction and training. When the heart is found, choose your moment to <b>strike</b>.</li>
         <li>Pause any time. The game pauses itself when something needs you. Tap the map to inspect.</li>
       </ul>
@@ -422,8 +448,11 @@ document.addEventListener('click', (e) => {
     case 'curfew':
       setDirective(s, 'curfew', d.v === '1');
       break;
-    case 'stance':
-      setDirective(s, 'stance', d.v as 'walls' | 'shelter');
+    case 'hunt':
+      setDirective(s, 'hunt', d.v === '1');
+      break;
+    case 'boon':
+      chooseBoon(s, Number(d.i));
       break;
     case 'strike':
       confirmStrike = true;
@@ -439,8 +468,10 @@ document.addEventListener('click', (e) => {
       recallStrike(s);
       break;
     case 'bell':
+      setBell(s, d.v === '1');
+      break;
     case 'fire':
-      flash(intervene(s, d.act));
+      flash(fireStores(s));
       break;
     case 'build':
       flash(queueProject(s, JSON.parse(d.spec!) as ProjectSpec));
@@ -463,14 +494,7 @@ document.addEventListener('click', (e) => {
 
 document.addEventListener('input', (e) => {
   const el = e.target as HTMLInputElement;
-  if (!el.dataset.labor) return;
-  setLabor(s, el.dataset.labor as Labor, Number(el.value));
-  // Update the percentages without rebuilding the slider being dragged.
-  const total = (Object.keys(s.labor) as Labor[]).reduce((n, l) => n + s.labor[l], 0);
-  document.querySelectorAll<HTMLInputElement>('input[data-labor]').forEach((inp) => {
-    const hint = inp.nextElementSibling as HTMLElement | null;
-    if (hint) hint.textContent = `${pct(total ? s.labor[inp.dataset.labor as Labor] / total : 0)} of the workforce`;
-  });
+  if (el.dataset.split) setSplit(s, el.dataset.split as 'scout' | 'build', Number(el.value));
 });
 document.addEventListener('pointerdown', (e) => {
   if ((e.target as HTMLElement).matches?.('input[type=range]')) dragging = true;
@@ -512,7 +536,7 @@ let lastSave = 0;
 function frame(now: number) {
   const dt = Math.min(0.25, (now - last) / 1000);
   last = now;
-  const blocked = !!(s.event || s.alert || s.outcome !== 'playing' || showHelp);
+  const blocked = !!(s.event || s.boon || s.alert || s.outcome !== 'playing' || showHelp);
   if (!paused && !blocked) {
     acc += (dt * speed * 24) / SECONDS_PER_DAY;
     let n = 0;
@@ -520,7 +544,7 @@ function frame(now: number) {
       step(s);
       acc -= DT;
       n++;
-      if (s.event || s.alert || s.outcome !== 'playing') {
+      if (s.event || s.boon || s.alert || s.outcome !== 'playing') {
         acc = 0;
         break;
       }

@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { laborCounts, newGame, queueProject, setLabor, step } from '../src/core/sim';
+import { jobCounts, newGame, queueProject, setSplit, step } from '../src/core/sim';
 import { playOut } from '../sim/bot';
 
 const runHours = (s: ReturnType<typeof newGame>, h: number) => {
   for (let i = 0; i < h * 20 && s.outcome === 'playing'; i++) {
     if (s.event) s.event = null;
+    if (s.boon) s.boon = null;
     s.alert = null;
     step(s);
   }
@@ -17,19 +18,41 @@ describe('simulation', () => {
     expect(JSON.stringify(a)).toEqual(JSON.stringify(b));
   });
 
-  it('assigns labor according to the sliders', () => {
+  it('keeps soldiers and workers in separate pools', () => {
     const s = newGame(4);
-    for (const l of ['gather', 'build', 'scout', 'hunt'] as const) setLabor(s, l, 0);
-    setLabor(s, 'guard', 100);
+    s.directives.hunt = false;
+    setSplit(s, 'scout', 0);
+    setSplit(s, 'build', 0);
     runHours(s, 1);
-    expect(laborCounts(s).guard).toBe(s.colonists.length);
+    const soldiers = s.colonists.filter((c) => c.role === 'militia' || c.role === 'archer' || c.role === 'scout');
+    expect(soldiers.every((c) => c.labor === 'guard')).toBe(true);
+    expect(s.colonists.filter((c) => c.labor === 'guard').length).toBe(soldiers.length);
+    expect(jobCounts(s).scout).toBe(0);
+  });
+
+  it('the bell brings everyone to the walls', () => {
+    const s = newGame(8);
+    runHours(s, 6);
+    s.bell = true;
+    runHours(s, 8);
+    expect(s.colonists.filter((c) => c.task !== 'wounded').every((c) => Math.hypot(c.x, c.y) < 10)).toBe(true);
+  });
+
+  it('offers a choice at the end of the day', () => {
+    const s = newGame(9);
+    while (!s.boon && s.time < 30) {
+      s.alert = null;
+      if (s.event) s.event = null;
+      step(s);
+    }
+    expect(s.boon?.length).toBe(3);
   });
 
   it('builders finish a queued project', () => {
     const s = newGame(5);
     s.supplies = 200;
     expect(queueProject(s, { kind: 'inner', building: 'granary' })).toBeNull();
-    setLabor(s, 'build', 100);
+    setSplit(s, 'build', 100);
     runHours(s, 20);
     expect(s.settlement.inner.granary).toBe(true);
   });

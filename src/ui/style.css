@@ -131,10 +131,13 @@ p { margin: 6px 0; }
 .bad { color: var(--bad); }
 .info { color: var(--accent); }
 
-.slider { padding: 6px 0; border-top: 1px solid var(--line); }
-.slider .row { margin: 0; }
-.slider .count { font-weight: 700; font-variant-numeric: tabular-nums; min-width: 2ch; text-align: right; }
-.slider input { width: 100%; accent-color: var(--accent); height: 28px; }
+.split { padding-top: 4px; }
+.split .ends { display: flex; justify-content: space-between; font-size: 14px; font-variant-numeric: tabular-nums; }
+.split input { width: 100%; accent-color: var(--accent); height: 32px; margin: 2px 0; }
+.split.paused .ends, .split.paused input { opacity: 0.45; }
+.card.bell.ringing { border-color: var(--accent); background: var(--panel-2); }
+.boons button { display: flex; flex-direction: column; gap: 2px; }
+.boons .kind { font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--accent); }
 
 .bar { display: block; height: 6px; background: var(--panel-2); border-radius: 3px; margin-top: 4px; overflow: hidden; }
 .bar span { display: block; height: 100%; background: var(--accent); }

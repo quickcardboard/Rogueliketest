@@ -1,12 +1,12 @@
-import { DT, HOME_R, SEGMENTS, WALL_HP, ROLE_INFO, ROLE_VS, WALL_R, WORLD_R, WOUND_HOURS } from './data';
+import { DT, HOME_R, POOL_OF, SEGMENTS, ROLE_INFO, ROLE_VS, WALL_R, WORLD_R, WOUND_HOURS } from './data';
 import { triggerStrangeEvent } from './events';
 import { chance, next } from './rng';
-import { addLog, colonistPower, grantRandomSpecial, spawnColonist } from './state';
+import { addLog, colonistPower, grantRandomSpecial, spawnColonist, wallMax } from './state';
 import type { Colonist, Feature, GameState, HordeUnit, Vec } from './types';
 import { angleOf, dist, fogIndex, isNight, len, sectorName } from './world';
 
 export function mostDamagedSegment(s: GameState): number {
-  const max = s.settlement.wallLevel * WALL_HP;
+  const max = wallMax(s);
   let best = -1;
   let low = max;
   s.settlement.wallHp.forEach((hp, i) => {
@@ -194,8 +194,6 @@ export function startLabor(s: GameState, c: Colonist) {
       const t = pickScoutTarget(s, c);
       return setTask(c, 'scout', 'out', t.x, t.y, t.target);
     }
-    case 'hunt':
-      return setTask(c, 'hunt', 'muster');
   }
 }
 
@@ -215,8 +213,11 @@ export function stepColonist(s: GameState, c: Colonist) {
   const spd = speedOf(s, c);
   const assault = assaultNear(s);
 
+  // The bell calls everyone home to the walls.
+  if (s.bell && (c.task === 'gather' || c.task === 'scout' || (c.task === 'build' && !atHome(c)))) goHome(c);
+
   // Non-fighters in the field run home when they see the horde.
-  if (dist(c) > WALL_R && c.task !== 'wounded' && c.task !== 'strike' && !(c.task === 'hunt' && c.phase !== 'muster') && c.task !== 'home') {
+  if (dist(c) > WALL_R && c.task !== 'wounded' && c.task !== 'strike' && c.task !== 'hunt' && c.task !== 'home') {
     const threat = nearestHorde(s, c, ROLE_INFO[c.role].sight * 0.8);
     if (threat) {
       goHome(c);
@@ -260,7 +261,7 @@ export function stepColonist(s: GameState, c: Colonist) {
     case 'idle':
     case 'guard':
     case 'build': {
-      if (assault) return defend(s, c, assault);
+      if (assault || s.bell) return defend(s, c, assault);
       if (c.task === 'idle') {
         const h = homeSpot(c);
         moveTo(c, h.x, h.y, spd * 0.5);
@@ -272,7 +273,7 @@ export function stepColonist(s: GameState, c: Colonist) {
         if (moveTo(c, c.tx, c.ty, spd)) {
           const work = ROLE_INFO[c.role].work * DT;
           if (s.projects.length) s.projects[0]!.workLeft -= work;
-          else s.settlement.wallHp[repair] = Math.min(s.settlement.wallLevel * WALL_HP, s.settlement.wallHp[repair]! + work * 3);
+          else s.settlement.wallHp[repair] = Math.min(wallMax(s), s.settlement.wallHp[repair]! + work * 3);
         }
         return;
       }
@@ -284,32 +285,29 @@ export function stepColonist(s: GameState, c: Colonist) {
     case 'scout':
       return scout(s, c, spd);
     case 'hunt':
-      if (c.phase === 'muster') {
-        if (assault) return defend(s, c, assault);
-        const w = wallSpot(c, (c.id * 1.3) % (Math.PI * 2), 1);
-        moveTo(c, w.x, w.y, spd);
-        return;
-      }
       return hunt(s, c, spd);
     case 'strike':
       return strike(s, c, spd);
   }
 }
 
-function defend(s: GameState, c: Colonist, enemy: Vec) {
+/** Soldiers (and everyone, once the bell rings) take the walls; the rest shelter in the keep. */
+function defend(s: GameState, c: Colonist, enemy: Vec | null) {
+  const fights = POOL_OF[c.role] === 'military' || s.bell;
+  if (!fights) {
+    moveTo(c, (((c.id * 13) % 7) - 3) * 0.4, (((c.id * 7) % 7) - 3) * 0.4, ROLE_INFO[c.role].speed);
+    return;
+  }
   // Anything that got inside the walls is dealt with first.
-  if (c.role !== 'archer' && (isFighter(c) || s.directives.stance === 'walls' || c.task === 'guard')) {
+  if (c.role !== 'archer') {
     const inside = nearestHorde(s, c, 30, (u) => dist(u) < WALL_R - 0.2);
     if (inside) {
       moveTo(c, inside.x, inside.y, ROLE_INFO[c.role].speed);
       return;
     }
   }
-  const a = angleOf(enemy);
-  if (!isFighter(c) && s.directives.stance === 'shelter' && c.task !== 'guard') {
-    moveTo(c, 0, 0, ROLE_INFO[c.role].speed);
-    return;
-  }
+  // With no enemy in sight, spread out around the whole wall.
+  const a = enemy ? angleOf(enemy) : (c.id * 2.399) % (Math.PI * 2);
   const w = wallSpot(c, a, c.role === 'archer' ? 0.6 : 1.6);
   moveTo(c, w.x, w.y, ROLE_INFO[c.role].speed);
 }
@@ -334,7 +332,7 @@ function gather(s: GameState, c: Colonist, spd: number) {
   }
   if (c.phase === 'work') {
     if (!f) return goHome(c);
-    const rate = (c.role === 'builder' ? 2.2 : 1.5) * DT;
+    const rate = (c.role === 'builder' ? 2.2 : 1.5) * (s.specials.includes('greenThumb') ? 1.3 : 1) * DT;
     const take = Math.min(rate, f.amount, ROLE_INFO[c.role].carry - c.carry);
     f.amount -= take;
     c.carry += take;
@@ -465,7 +463,7 @@ function strike(s: GameState, c: Colonist, spd: number) {
 
 // ───────────── Combat ─────────────
 
-export function colonistAttacks(s: GameState, bell: boolean) {
+export function colonistAttacks(s: GameState) {
   for (const c of s.colonists) {
     if (c.hp <= 0 || c.task === 'wounded' || c.task === 'train') continue;
     const info = ROLE_INFO[c.role];
@@ -475,7 +473,7 @@ export function colonistAttacks(s: GameState, bell: boolean) {
     if (!onWall && !isFighter(c) && c.task !== 'hunt' && c.task !== 'strike') continue;
     const u = nearestHorde(s, c, range);
     if (!u) continue;
-    const dmg = info.dps * ROLE_VS[c.role][u.type] * (1 + 0.2 * s.settlement.equipment) * (bell ? 1.5 : 1) * (onWall ? 1.15 : 1) * DT;
+    const dmg = info.dps * ROLE_VS[c.role][u.type] * (1 + 0.2 * s.settlement.equipment) * (POOL_OF[c.role] === 'military' && s.specials.includes('warbanner') ? 1.2 : 1) * (onWall ? 1.15 : 1) * DT;
     u.hp -= dmg;
   }
   for (const a of s.settlement.towers) {

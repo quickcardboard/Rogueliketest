@@ -78,13 +78,13 @@ export function stepHorde(s: GameState) {
   if (!s.warband && s.threat >= s.threshold) {
     const toward = { x: -main.x / (dist(main) || 1), y: -main.y / (dist(main) || 1) };
     const stage = { x: main.x + toward.x * 8, y: main.y + toward.y * 8 };
-    const types = compose(s, s.threshold * 1.1, weights);
+    const types = compose(s, s.threshold * 1.35, weights);
     for (const t of types) {
       const u = spawnUnit(s, t, stage.x + (next(s.rng) - 0.5) * 8, stage.y + (next(s.rng) - 0.5) * 8, 'gather', -1);
       u.tx = stage.x + (next(s.rng) - 0.5) * 10;
       u.ty = stage.y + (next(s.rng) - 0.5) * 10;
     }
-    s.warband = { units: types.length, start: s.time, dir: segmentOf(stage), killed: 0, lost: 0, stolen: 0, interventions: s.specials.includes('bell') ? 2 : 1, marching: false, gatherUntil: s.time + 8 + next(s.rng) * 6, announced: false };
+    s.warband = { units: types.length, start: s.time, dir: segmentOf(stage), killed: 0, lost: 0, stolen: 0, interventions: s.specials.includes('tinderbox') ? 2 : 1, marching: false, gatherUntil: s.time + 8 + next(s.rng) * 6, announced: false };
   }
 
   const wb = s.warband;
@@ -177,8 +177,7 @@ export function stepHorde(s: GameState) {
           u.y = (u.y / d) * (WALL_R - 0.5);
           break;
         }
-        const fallback = s.directives.stance === 'shelter' ? 1.2 : 1;
-        s.settlement.wallHp[seg] = Math.max(0, hp - info.wallDps * fallback * DT);
+        s.settlement.wallHp[seg] = Math.max(0, hp - info.wallDps * DT);
         if (s.settlement.wallHp[seg] === 0) addLog(s, `The ${SEGMENT_NAMES[seg]} wall is breached!`, 'bad');
         // Defenders right behind the wall get hit too.
         const prey = nearestColonist(s, u, 2.5, false);
@@ -198,6 +197,11 @@ export function stepHorde(s: GameState) {
     s.assaults++;
     addLog(s, `The warband is broken. ${wb.killed} of them fell; we lost ${wb.lost}${wb.stolen >= 1 ? ` and ${Math.round(wb.stolen)} supplies` : ''}.`, wb.lost > 2 ? 'bad' : 'good');
     s.warband = null;
+    if (s.bell) {
+      s.bell = false;
+      s.dirtyLabor = true;
+      addLog(s, 'The bell falls silent. Everyone goes back to work.');
+    }
     s.threat = 0;
     s.threshold = 34 + s.assaults * 9 + int(s.rng, 0, 10);
   }

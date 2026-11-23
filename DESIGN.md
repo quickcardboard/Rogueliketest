@@ -16,6 +16,12 @@ Playtest feedback on the turn-based Phase 0: the setting, the moving enemies and
 - **Recruiting = training villagers** into militia, archers, scouts or builders. New people arrive as survivors (found by scouts) or wanderers (drawn by the hearth).
 - **Warbands are visible agents.** They gather near a nest for some hours (scouting can spot them), then march on the colony. Nests keep roaming guards.
 
+**Second playtest revision [Decided]:**
+- Five labor sliders sharing one population were confusing. There are now **two pools with one slider each**: the **military** (militia, archers, scouts) splits between *guard* and *scout*; the **economy** (villagers, builders) splits between *gather* and *build*. Nobody crosses pools except through training.
+- Hunting nests is a military directive: when it is quiet, guards sally out to burn known nests (on/off).
+- **The bell** is a toggle: everyone drops their work and garrisons the walls; villagers are much weaker fighters than soldiers. It falls silent by itself when the warband is broken. Without it, only soldiers fight and the untrained shelter in the keep.
+- **End of each day:** a choice of three blessings, one relic (permanent) and two gifts (immediate).
+
 Sections below describe the original design; where they conflict with this section, this section wins.
 
 ## 1. Pitch

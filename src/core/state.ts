@@ -42,6 +42,11 @@ export function spawnColonist(s: GameState, role: Role, x = 0, y = 0): Colonist 
   return c;
 }
 
+/** Hit points of a full wall section at the current palisade level. */
+export function wallMax(s: GameState): number {
+  return s.settlement.wallLevel * WALL_HP * (s.specials.includes('ironroot') ? 1.4 : 1);
+}
+
 /** Fighting power of one colonist, used for nests and the heart. */
 export function colonistPower(s: GameState, c: Colonist): number {
   return ROLE_INFO[c.role].dps * (1 + 0.2 * s.settlement.equipment);
@@ -50,6 +55,7 @@ export function colonistPower(s: GameState, c: Colonist): number {
 export function grantSpecial(s: GameState, id: SpecialId, prefix = 'Found: ') {
   if (s.specials.includes(id)) return;
   s.specials.push(id);
+  if (id === 'ironroot') s.settlement.wallHp = s.settlement.wallHp.map((h) => h * 1.4);
   addLog(s, `${prefix}${SPECIAL_INFO[id].label}. ${SPECIAL_INFO[id].desc}`, 'good');
 }
 
@@ -73,7 +79,7 @@ export function newGame(seed: number): GameState {
     intel: {},
     fogSeen: new Array(FOG_N * FOG_N).fill(-1),
     fogStale: new Array(FOG_N * FOG_N).fill(0),
-    heart: { x: 0, y: 0, strength: 20, seen: null, nextBlight: 20, nextNest: 40, fightTimer: 0 },
+    heart: { x: 0, y: 0, strength: 24, seen: null, nextBlight: 20, nextNest: 40, fightTimer: 0 },
     nextId: 1,
     settlement: {
       wallLevel: 1,
@@ -85,8 +91,10 @@ export function newGame(seed: number): GameState {
     },
     projects: [],
     training: [],
-    labor: { gather: 40, build: 15, scout: 15, guard: 20, hunt: 10 },
-    directives: { curfew: true, stance: 'walls' },
+    split: { scout: 40, build: 40 },
+    bell: false,
+    boon: null,
+    directives: { curfew: true, hunt: true },
     specials: [],
     threat: 0,
     threshold: 0,
@@ -100,7 +108,6 @@ export function newGame(seed: number): GameState {
     outcomeText: '',
     stats: { born: 0, died: 0, gathered: 0 },
     hunger: 0,
-    bellUntil: 0,
     dirtyLabor: true,
   };
   s.threshold = 34 + int(s.rng, 0, 8);

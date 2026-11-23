@@ -8,77 +8,53 @@ import {
   MAX_EQUIPMENT,
   MAX_TOWERS,
   MAX_WALL,
+  GIFT_INFO,
+  POOL_OF,
   ROLE_INFO,
   SEGMENT_NAMES,
+  SPECIAL_INFO,
   UPKEEP_PER_DAY,
-  WALL_HP,
   WALL_R,
 } from './data';
 import { maybeDailyEvent, resolveEvent } from './events';
 import { assaultDirection, stepHorde, threatRate } from './horde';
 import { chance, int, next, pick } from './rng';
-import { addLog, colonistPower, dayOf, spawnColonist } from './state';
-import type { Colonist, Directives, GameState, Labor, ProjectSpec, Role } from './types';
+import { addLog, colonistPower, dayOf, grantSpecial, spawnColonist, wallMax } from './state';
+import type { Boon, Colonist, Directives, GameState, GiftId, Labor, Pool, ProjectSpec, Role, SpecialId } from './types';
 import { angleOf, dist, freshness, isNight, moveHeart, sectorName, shiftLand, updateVision } from './world';
 
 export { newGame, dayOf, clock } from './state';
 
-const LABORS: Labor[] = ['gather', 'build', 'scout', 'guard', 'hunt'];
+const interruptible = (c: Colonist) => c.task === 'idle' || c.task === 'guard' || c.task === 'build';
 
-/** How well suited a role is to a kind of labor. */
-const FIT: Record<Role, Record<Labor, number>> = {
-  villager: { gather: 2, build: 2, scout: 0.2, guard: 0.6, hunt: 0.1 },
-  militia: { gather: 0.5, build: 0.5, scout: 0.3, guard: 2.5, hunt: 3 },
-  archer: { gather: 0.5, build: 0.5, scout: 0.3, guard: 3, hunt: 2 },
-  scout: { gather: 1, build: 0.5, scout: 4, guard: 0.5, hunt: 0.5 },
-  builder: { gather: 2, build: 4, scout: 0.3, guard: 0.3, hunt: 0.1 },
-};
+/** Who can be given a job right now. */
+const available = (c: Colonist) => c.task !== 'wounded' && c.task !== 'train' && c.task !== 'strike' && c.task !== 'hunt';
 
-export function population(s: GameState): number {
-  return s.colonists.length;
-}
+/** Preference order when choosing who scouts / who builds. */
+const SCOUT_PREF: Record<Role, number> = { scout: 3, archer: 2, militia: 1, villager: 0, builder: 0 };
+const BUILD_PREF: Record<Role, number> = { builder: 3, villager: 1, scout: 0, archer: 0, militia: 0 };
 
-export function canAct(s: GameState) {
-  return s.outcome === 'playing';
-}
-
-const interruptible = (c: Colonist) =>
-  c.task === 'idle' || c.task === 'guard' || c.task === 'build' || (c.task === 'hunt' && c.phase === 'muster');
-
-/** Distributes colonists over labor according to the sliders, preferring suitable roles. */
+/**
+ * Two pools, one split each. Soldiers guard or scout; workers gather or build.
+ * People out in the field keep their job until they return.
+ */
 export function allocateLabor(s: GameState) {
-  const pool = s.colonists.filter((c) => c.task !== 'wounded' && c.task !== 'train' && c.task !== 'strike');
-  const total = LABORS.reduce((n, l) => n + s.labor[l], 0) || 1;
-  // Quotas with largest-remainder rounding.
-  const raw = LABORS.map((l) => (s.labor[l] / total) * pool.length);
-  const quota: Record<Labor, number> = { gather: 0, build: 0, scout: 0, guard: 0, hunt: 0 };
-  LABORS.forEach((l, i) => (quota[l] = Math.floor(raw[i]!)));
-  let left = pool.length - LABORS.reduce((n, l) => n + quota[l], 0);
-  [...LABORS].sort((a, b) => (raw[LABORS.indexOf(b)]! % 1) - (raw[LABORS.indexOf(a)]! % 1)).forEach((l) => {
-    if (left > 0 && s.labor[l] > 0) {
-      quota[l]++;
-      left--;
-    }
-  });
+  split(s, 'military', 'scout', 'guard', s.split.scout / 100, SCOUT_PREF);
+  split(s, 'economy', 'build', 'gather', s.split.build / 100, BUILD_PREF);
+}
 
-  // People out in the field keep their job until they return.
+function split(s: GameState, pool: Pool, a: Labor, b: Labor, share: number, pref: Record<Role, number>) {
+  const members = s.colonists.filter((c) => POOL_OF[c.role] === pool && available(c));
+  let wantA = Math.round(members.length * share);
+  // Busy people count toward their current job.
   const movable: Colonist[] = [];
-  for (const c of pool) {
-    if (!interruptible(c) && c.labor) quota[c.labor]--;
-    else movable.push(c);
+  for (const c of members) {
+    if (!interruptible(c) && (c.labor === a || c.labor === b)) {
+      if (c.labor === a) wantA--;
+    } else movable.push(c);
   }
-  const pairs: { c: Colonist; l: Labor; v: number }[] = [];
-  for (const c of movable) for (const l of LABORS) pairs.push({ c, l, v: FIT[c.role][l] + (c.labor === l ? 0.6 : 0) });
-  pairs.sort((a, b) => b.v - a.v || a.c.id - b.c.id);
-  const done = new Set<number>();
-  for (const { c, l } of pairs) {
-    if (done.has(c.id) || quota[l] <= 0) continue;
-    done.add(c.id);
-    quota[l]--;
-    assign(s, c, l);
-  }
-  // Anyone left over keeps what they had, or gathers.
-  for (const c of movable) if (!done.has(c.id)) assign(s, c, c.labor ?? 'gather');
+  movable.sort((x, y) => pref[y.role] - pref[x.role] + (y.labor === a ? 0.5 : 0) - (x.labor === a ? 0.5 : 0) || x.id - y.id);
+  movable.forEach((c, i) => assign(s, c, i < wantA ? a : b));
 }
 
 function assign(s: GameState, c: Colonist, l: Labor) {
@@ -90,10 +66,13 @@ function assign(s: GameState, c: Colonist, l: Labor) {
   }
 }
 
+/** With the hunt directive on and no assault near, guards sally out to burn the nearest known nest. */
 function dispatchHunters(s: GameState) {
-  const musters = s.colonists.filter((c) => c.task === 'hunt' && c.phase === 'muster' && atHome(c));
-  if (musters.length < 2) return;
+  if (!s.directives.hunt || s.warband || s.bell) return;
+  if (s.threat > s.threshold * 0.75) return;
   if (isNight(s) && s.directives.curfew) return;
+  const guards = s.colonists.filter((c) => c.task === 'guard' && atHome(c) && isFighter(c));
+  if (guards.length < 2) return;
   let best: number | null = null;
   let bestD = Infinity;
   for (const [id, i] of Object.entries(s.intel)) {
@@ -106,10 +85,18 @@ function dispatchHunters(s: GameState) {
   }
   if (best === null) return;
   const nest = s.intel[best]!;
-  const power = musters.reduce((n, c) => n + colonistPower(s, c), 0);
-  if (power < nest.amount * 2.2) return;
-  for (const c of musters) setTask(c, 'hunt', 'out', nest.x, nest.y, best);
-  addLog(s, `${musters.length} hunters set out for the ${sectorName(nest)} nest.`);
+  // Send the strongest few needed; the rest keep the walls.
+  guards.sort((x, y) => colonistPower(s, y) - colonistPower(s, x));
+  const party: Colonist[] = [];
+  let power = 0;
+  for (const c of guards) {
+    if (power >= nest.amount * 2.6) break;
+    party.push(c);
+    power += colonistPower(s, c);
+  }
+  if (power < nest.amount * 2.2 || party.length < 2) return;
+  for (const c of party) setTask(c, 'hunt', 'out', nest.x, nest.y, best);
+  addLog(s, `${party.length} guards set out to burn the ${sectorName(nest)} nest.`);
 }
 
 function startTraining(s: GameState) {
@@ -132,7 +119,7 @@ function completeProjects(s: GameState) {
   switch (p.spec.kind) {
     case 'wall':
       st.wallLevel++;
-      st.wallHp = st.wallHp.map(() => st.wallLevel * WALL_HP);
+      st.wallHp = st.wallHp.map(() => wallMax(s));
       addLog(s, `The palisade now stands at level ${st.wallLevel}.`, 'good');
       break;
     case 'tower': {
@@ -181,7 +168,7 @@ function resolveStrike(s: GameState) {
 
 /** Advances the simulation by one fixed step. */
 export function step(s: GameState) {
-  if (s.outcome !== 'playing' || s.event) return;
+  if (s.outcome !== 'playing' || s.event || s.boon) return;
   const prevHour = s.time;
   s.time += DT;
   s.steps++;
@@ -194,7 +181,7 @@ export function step(s: GameState) {
 
   // Upkeep.
   const eat = s.colonists.length * (UPKEEP_PER_DAY / 24) * DT * (s.settlement.inner.granary ? 0.67 : 1);
-  s.supplies += (s.specials.includes('seedVault') ? 4 / 24 : 0) * DT - eat;
+  s.supplies += (s.specials.includes('seedVault') ? 6 / 24 : 0) * DT - eat;
   if (s.supplies < 0) {
     s.supplies = 0;
     s.hunger += DT;
@@ -211,7 +198,7 @@ export function step(s: GameState) {
 
   for (const c of s.colonists) stepColonist(s, c);
   stepHorde(s);
-  colonistAttacks(s, s.time < s.bellUntil);
+  colonistAttacks(s);
   s.colonists = s.colonists.filter((c) => c.hp > 0);
   completeProjects(s);
 
@@ -226,11 +213,13 @@ export function step(s: GameState) {
   if (s.steps % 20 === 0) {
     dispatchHunters(s);
     startTraining(s);
-    s.heart.strength += 0.6 / 24;
+    s.heart.strength += 0.9 / 24;
   }
 
-  if (crossed(DUSK) && s.directives.curfew) {
-    for (const c of s.colonists) if ((c.task === 'gather' || c.task === 'scout') && c.phase !== 'work') goHome(c);
+  if (crossed(DUSK)) {
+    if (s.directives.curfew) for (const c of s.colonists) if ((c.task === 'gather' || c.task === 'scout') && c.phase !== 'work') goHome(c);
+    // The end of the day brings a choice.
+    s.boon = rollBoons(s);
   }
   if (crossed(DAWN)) {
     addLog(s, `Day ${dayOf(s.time)} dawns.`);
@@ -269,8 +258,68 @@ export function step(s: GameState) {
 
 // ───────────── Player decisions ─────────────
 
-export function setLabor(s: GameState, l: Labor, value: number) {
-  s.labor[l] = Math.max(0, Math.min(100, Math.round(value)));
+/** Sets the share of soldiers who scout, or of workers who build (0–100). */
+export function setSplit(s: GameState, which: 'scout' | 'build', value: number) {
+  s.split[which] = Math.max(0, Math.min(100, Math.round(value)));
+  s.dirtyLabor = true;
+}
+
+/** Rings or silences the bell. While it rings, everyone garrisons the walls. */
+export function setBell(s: GameState, on: boolean) {
+  if (s.bell === on) return;
+  s.bell = on;
+  s.dirtyLabor = true;
+  if (on) {
+    for (const c of s.colonists) if ((c.task === 'gather' || c.task === 'scout' || (c.task === 'hunt' && c.phase !== 'fight')) && dist(c) > WALL_R) goHome(c);
+    addLog(s, 'The bell rings out. Everyone drops their work and runs for the walls.', 'info');
+  } else addLog(s, 'The bell falls silent. Everyone goes back to work.');
+}
+
+// ───────────── End of day ─────────────
+
+function rollBoons(s: GameState): Boon[] {
+  const relics = (Object.keys(SPECIAL_INFO) as SpecialId[]).filter((x) => !s.specials.includes(x));
+  const gifts = (Object.keys(GIFT_INFO) as GiftId[]).filter((g) => g !== 'forge' || s.settlement.equipment < MAX_EQUIPMENT);
+  const out: Boon[] = [];
+  if (relics.length) out.push({ kind: 'relic', id: pick(s.rng, relics) });
+  while (out.length < 3 && gifts.length) {
+    const g = gifts.splice(int(s.rng, 0, gifts.length - 1), 1)[0]!;
+    out.push({ kind: 'gift', id: g });
+  }
+  return out;
+}
+
+export function chooseBoon(s: GameState, i: number) {
+  const b = s.boon?.[i];
+  s.boon = null;
+  if (!b) return;
+  if (b.kind === 'relic') return grantSpecial(s, b.id as SpecialId, 'You chose a relic: ');
+  const g = b.id as GiftId;
+  switch (g) {
+    case 'cache':
+      s.supplies += 30;
+      break;
+    case 'newcomers':
+      for (let k = 0; k < 2; k++) spawnColonist(s, 'villager', (next(s.rng) - 0.5) * 4, (next(s.rng) - 0.5) * 4);
+      s.stats.born += 2;
+      break;
+    case 'veteran':
+      spawnColonist(s, 'militia');
+      s.stats.born++;
+      break;
+    case 'pathfinder':
+      spawnColonist(s, 'scout');
+      s.stats.born++;
+      break;
+    case 'masons':
+      s.settlement.wallHp = s.settlement.wallHp.map(() => wallMax(s));
+      if (s.projects[0]) s.projects[0].workLeft -= 20;
+      break;
+    case 'forge':
+      s.settlement.equipment = Math.min(MAX_EQUIPMENT, s.settlement.equipment + 1);
+      break;
+  }
+  addLog(s, `${GIFT_INFO[g].label}: ${GIFT_INFO[g].desc}`, 'good');
   s.dirtyLabor = true;
 }
 
@@ -364,24 +413,21 @@ export function recallStrike(s: GameState) {
   s.dirtyLabor = true;
 }
 
-export function intervene(s: GameState, kind: 'bell' | 'fire'): string | null {
+/** Fire the outer stores: burn supplies to scorch the horde at the walls. */
+export function fireStores(s: GameState): string | null {
   const wb = s.warband;
   if (!wb || !wb.marching) return 'There is no assault to answer.';
-  if (wb.interventions <= 0) return 'No interventions left for this assault.';
-  if (kind === 'bell') {
-    for (const c of s.colonists) if ((c.task === 'gather' || c.task === 'scout' || (c.task === 'hunt' && c.phase !== 'fight')) && dist(c) > WALL_R) goHome(c);
-    s.bellUntil = s.time + 3;
-    addLog(s, 'The bell rings out. Everyone in the fields runs for the walls, and the defenders take heart.', 'info');
-  } else {
-    if (s.supplies < 15) return 'Needs 15 supplies to burn.';
-    s.supplies -= 15;
-    let hit = 0;
-    for (const u of s.horde) if (u.mode !== 'roam' && dist(u) < WALL_R + 10) {
+  if (wb.interventions <= 0) return 'The stores have already burned this assault.';
+  const free = s.specials.includes('tinderbox');
+  if (!free && s.supplies < 15) return 'Needs 15 supplies to burn.';
+  if (!free) s.supplies -= 15;
+  let hit = 0;
+  for (const u of s.horde)
+    if (u.mode !== 'roam' && dist(u) < WALL_R + 10) {
       u.hp -= 3;
       hit++;
     }
-    addLog(s, `The outer stores go up in flames. ${hit} of the horde are caught in the fire.`, 'info');
-  }
+  addLog(s, `The outer stores go up in flames. ${hit} of the horde are caught in the fire.`, 'info');
   wb.interventions--;
   return null;
 }
@@ -427,9 +473,17 @@ export function roleCounts(s: GameState): Record<Role, number> {
   return out;
 }
 
-export function laborCounts(s: GameState): Record<Labor, number> {
-  const out: Record<Labor, number> = { gather: 0, build: 0, scout: 0, guard: 0, hunt: 0 };
-  for (const c of s.colonists) if (c.labor) out[c.labor]++;
+/** What people are doing right now. */
+export function jobCounts(s: GameState) {
+  const out = { gather: 0, build: 0, scout: 0, guard: 0, hunt: 0, strike: 0, wounded: 0, train: 0, military: 0, economy: 0 };
+  for (const c of s.colonists) {
+    if (c.task === 'hunt') out.hunt++;
+    else if (c.task === 'strike') out.strike++;
+    else if (c.task === 'wounded') out.wounded++;
+    else if (c.task === 'train') out.train++;
+    else if (c.labor) out[c.labor]++;
+    if (c.task !== 'train') out[POOL_OF[c.role]]++;
+  }
   return out;
 }
 

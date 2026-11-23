@@ -1,4 +1,4 @@
-import type { FeatureKind, HordeType, InnerBuilding, Labor, Role, SpecialId } from './types';
+import type { FeatureKind, GiftId, HordeType, InnerBuilding, Labor, Pool, Role, SpecialId } from './types';
 
 /** World radius in units. The colony is at the centre. */
 export const WORLD_R = 100;
@@ -23,11 +23,12 @@ export const ROLE_INFO: Record<Role, { label: string; desc: string; hp: number; 
 
 export const LABOR_INFO: Record<Labor, { label: string; desc: string }> = {
   gather: { label: 'Gather', desc: 'Forage forests and salvage ruins for supplies.' },
-  build: { label: 'Build', desc: 'Work on construction.' },
-  scout: { label: 'Scout', desc: 'Walk into the fog and keep the map fresh. Find survivors.' },
-  guard: { label: 'Guard', desc: 'Stay on the walls, ready for an assault.' },
-  hunt: { label: 'Hunt', desc: 'Muster and burn out known nests. Heals the land.' },
+  build: { label: 'Build', desc: 'Work on construction and mend the walls.' },
+  scout: { label: 'Scout', desc: 'Walk into the fog, keep the map fresh, find survivors.' },
+  guard: { label: 'Guard', desc: 'Hold the walls. Hunt nests when it is quiet.' },
 };
+
+export const POOL_OF: Record<Role, Pool> = { villager: 'economy', builder: 'economy', militia: 'military', archer: 'military', scout: 'military' };
 
 export const HORDE_INFO: Record<HordeType, { label: string; hp: number; dps: number; wallDps: number; speed: number; cost: number }> = {
   swarmer: { label: 'Swarmers', hp: 2, dps: 1.5, wallDps: 2, speed: 6, cost: 1 },
@@ -63,10 +64,22 @@ export const INNER_INFO: Record<InnerBuilding, { label: string; desc: string }> 
 
 export const SPECIAL_INFO: Record<SpecialId, { label: string; desc: string }> = {
   cartographer: { label: 'Old Cartographer', desc: 'Everyone sees 40% further.' },
-  bell: { label: 'Bell of the First Wall', desc: '+1 intervention against every warband.' },
-  seedVault: { label: 'Seed Vault', desc: '+4 supplies every day.' },
+  tinderbox: { label: 'Tinderbox', desc: 'Fire the stores twice per assault, and it costs nothing.' },
+  seedVault: { label: 'Seed Vault', desc: '+6 supplies every day.' },
   hearthstone: { label: 'Hearthstone', desc: 'The wounded recover twice as fast.' },
   lantern: { label: 'Lantern of Dusk', desc: 'Warnings of the next warband are far more precise.' },
+  ironroot: { label: 'Ironroot Saplings', desc: 'The palisade is 40% sturdier.' },
+  greenThumb: { label: 'Green Thumb', desc: 'Gatherers work 30% faster.' },
+  warbanner: { label: 'Faded Warbanner', desc: 'Militia, archers and scouts fight 20% harder.' },
+};
+
+export const GIFT_INFO: Record<GiftId, { label: string; desc: string }> = {
+  cache: { label: 'A Forgotten Cache', desc: '+30 supplies now.' },
+  newcomers: { label: 'Newcomers', desc: 'Two villagers join the colony.' },
+  veteran: { label: 'A Veteran', desc: 'A seasoned militia fighter joins.' },
+  pathfinder: { label: 'A Pathfinder', desc: 'A scout who knows the valley joins.' },
+  masons: { label: 'Willing Hands', desc: 'Every wall section is mended, and current construction jumps ahead.' },
+  forge: { label: 'Old Steel', desc: 'Equipment improves by one level.' },
 };
 
 export const COSTS = {

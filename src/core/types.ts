@@ -1,12 +1,20 @@
 import type { RngState } from './rng';
 
 export type Role = 'villager' | 'militia' | 'archer' | 'scout' | 'builder';
-export type Labor = 'gather' | 'build' | 'scout' | 'guard' | 'hunt';
+export type Labor = 'gather' | 'build' | 'scout' | 'guard';
+/** Militia, archers and scouts are military; villagers and builders are the economy. */
+export type Pool = 'military' | 'economy';
 export type HordeType = 'swarmer' | 'brute' | 'flier';
 export type FeatureKind = 'forest' | 'regrowth' | 'ruins' | 'survivors' | 'nest' | 'blight' | 'strange';
 export type TaskKind = 'idle' | 'gather' | 'build' | 'scout' | 'guard' | 'hunt' | 'strike' | 'home' | 'train' | 'wounded';
 export type InnerBuilding = 'granary' | 'infirmary' | 'workshop' | 'hearth';
-export type SpecialId = 'cartographer' | 'bell' | 'seedVault' | 'hearthstone' | 'lantern';
+export type SpecialId = 'cartographer' | 'tinderbox' | 'seedVault' | 'hearthstone' | 'lantern' | 'ironroot' | 'greenThumb' | 'warbanner';
+export type GiftId = 'cache' | 'newcomers' | 'veteran' | 'pathfinder' | 'masons' | 'forge';
+
+export interface Boon {
+  kind: 'relic' | 'gift';
+  id: SpecialId | GiftId;
+}
 
 export interface Vec {
   x: number;
@@ -105,8 +113,8 @@ export interface Settlement {
 export interface Directives {
   /** At dusk, everyone comes home; or they keep working through the night. */
   curfew: boolean;
-  /** Everyone at home mans the walls during an assault, or the untrained shelter in the keep. */
-  stance: 'walls' | 'shelter';
+  /** When no assault is near, guards sally out to burn known nests. */
+  hunt: boolean;
 }
 
 export interface Warband {
@@ -162,7 +170,12 @@ export interface GameState {
   settlement: Settlement;
   projects: Project[];
   training: Role[];
-  labor: Record<Labor, number>;
+  /** Share of the military out scouting, and of the economy building (0–100). */
+  split: { scout: number; build: number };
+  /** The bell has been rung: everyone garrisons the walls. */
+  bell: boolean;
+  /** End-of-day choice waiting for the player. */
+  boon: Boon[] | null;
   directives: Directives;
   specials: SpecialId[];
   threat: number;
@@ -179,7 +192,6 @@ export interface GameState {
   stats: { born: number; died: number; gathered: number };
   /** Hours the stores have been empty. */
   hunger: number;
-  bellUntil: number;
   /** Set when sliders change so labor is reassigned on the next step. */
   dirtyLabor: boolean;
 }
