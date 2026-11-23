@@ -4,6 +4,20 @@
 
 ---
 
+## 0. Direction change (after the first playtest) **[Decided]**
+
+Playtest feedback on the turn-based Phase 0: the setting, the moving enemies and the unknown worked; turns, managing individual parties, and the grid did not. The game now leans toward **simulation**:
+
+- **Real-time with pause** (1×/2×/4×; a day is about 40 seconds at 1×). The game pauses itself for events, sighted warbands and the end of a run.
+- **The player makes the big decisions only:** labor priorities (sliders for Gather, Build, Scout, Guard, Hunt), directives (curfew, stance in assaults), what to construct, whom to train, when to strike the heart, and two emergency interventions during an assault.
+- **Everything else is automatic.** Colonists are simulated individuals who pick jobs that suit their role, walk out, gather, scout, hunt nests, flee danger and defend the walls by themselves.
+- **No building placement.** Walls are a ring around the colony; towers are raised facing the worst known threat.
+- **Organic map with drifting fog** instead of a grid. Fog clears where people are and thickens again in sectors where the land shifts.
+- **Recruiting = training villagers** into militia, archers, scouts or builders. New people arrive as survivors (found by scouts) or wanderers (drawn by the hearth).
+- **Warbands are visible agents.** They gather near a nest for some hours (scouting can spot them), then march on the colony. Nests keep roaming guards.
+
+Sections below describe the original design; where they conflict with this section, this section wins.
+
 ## 1. Pitch
 
 You lead a settlement besieged by a monstrous horde that grows out of a **living, shifting wilderness**. Scouting tells you what is coming, but the land moves and **information goes stale fast**. Between assaults you spend your two scarce currencies — **Supplies** and **People** — to scout, gather, build, train and set doctrine. Then you watch your colony **defend itself** in a simulated, animated battle. To win, you must find and destroy the **source** of the siege, hidden somewhere in the moving wilds.

@@ -1,408 +1,403 @@
+import { COSTS, DT, FEATURE_INFO, INNER_INFO, LABOR_INFO, MAX_EQUIPMENT, MAX_TOWERS, MAX_WALL, ROLE_INFO, SPECIAL_INFO, WALL_HP, WALL_R } from '../core/data';
 import {
-  actPreview,
-  advanceDay,
-  assaultEstimate,
-  assignSquad,
-  battleStep,
   cancelProject,
+  cancelTraining,
   chooseEvent,
-  expeditionDays,
-  income,
-  mergeSquads,
+  clock,
+  dayOf,
+  forecast,
+  intervene,
+  laborCounts,
   newGame,
-  people,
+  orderStrike,
   projectCost,
   queueProject,
-  recall,
-  sendExpedition,
-  setDoctrine,
-  trainSquad,
-  upkeep,
-} from '../core/game';
-import {
-  DIRS,
-  HORDE_INFO,
-  INNER_INFO,
-  MAX_EQUIPMENT,
-  MAX_SQUAD,
-  MAX_WALL,
-  RADIUS,
-  ROLE_INFO,
-  SPECIAL_INFO,
-  TILE_INFO,
-} from '../core/data';
-import type { GameState, InnerBuilding, Intervention, Pos, ProjectKind, Role, Squad } from '../core/types';
-import { dist, key, sectorOf } from '../core/world';
+  queueTraining,
+  recallStrike,
+  roleCounts,
+  setDirective,
+  setLabor,
+  step,
+  strikeOdds,
+  strikeParty,
+} from '../core/sim';
+import type { GameState, InnerBuilding, Labor, ProjectSpec, Role, Vec } from '../core/types';
+import { dist, sectorName } from '../core/world';
+import { MapView } from './render';
 
-const SAVE_KEY = 'holdfast-save-v1';
-const HELP_KEY = 'holdfast-help-seen';
-const app = document.getElementById('app')!;
+const SAVE_KEY = 'holdfast-sim-v1';
+const HELP_KEY = 'holdfast-sim-help';
+/** Real seconds per in-game day at 1×. */
+const SECONDS_PER_DAY = 40;
 
+type Tab = 'orders' | 'build' | 'people' | 'log';
 let s: GameState = load() ?? newGame(randomSeed());
-let selected: Pos | null = null;
-const chosen = new Set<number>();
-let mergeFrom: number | null = null;
+let speed = 1;
+let paused = true;
+let tab: Tab = 'orders';
+let showHelp = false;
+let confirmStrike = false;
 let toast = '';
+let toastTimer = 0;
+let selectedInfo: { at: Vec; html: string } | null = null;
+let dragging = false;
+let lastPanel = '';
+let lastHud = '';
 
 function randomSeed() {
   return Math.floor(Math.random() * 1e9);
 }
-
 function load(): GameState | null {
   try {
     const raw = localStorage.getItem(SAVE_KEY);
-    return raw ? (JSON.parse(raw) as GameState) : null;
+    const g = raw ? (JSON.parse(raw) as GameState) : null;
+    return g && g.colonists && g.fogSeen ? g : null;
   } catch {
     return null;
   }
 }
-
 function save() {
   try {
     localStorage.setItem(SAVE_KEY, JSON.stringify(s));
   } catch {
-    /* storage unavailable: play on without saving */
+    /* play on without saving */
   }
 }
 
-function act(err: string | null | void) {
-  if (err) {
-    toast = err;
-    setTimeout(() => {
-      toast = '';
-      render();
-    }, 1800);
-  }
-  // Drop selections that are no longer valid.
-  for (const id of [...chosen]) {
-    const q = s.squads.find((x) => x.id === id);
-    if (!q || !isHome(q)) chosen.delete(id);
-  }
-  save();
-  render();
-}
+// ───────────── Shell ─────────────
 
-const isHome = (q: Squad) => q.assignment.type === 'guard' || q.assignment.type === 'work';
+const app = document.getElementById('app')!;
+app.innerHTML = `
+  <header class="hud wrap" id="hud"></header>
+  <main class="layout wrap">
+    <section class="map-col">
+      <div class="map-wrap">
+        <canvas id="map" aria-label="Map of the valley"></canvas>
+        <div class="map-info" id="map-info" hidden></div>
+      </div>
+      <div class="controls">
+        <button id="pause" class="primary" aria-label="Play or pause">▶</button>
+        <div class="speeds" role="group" aria-label="Speed">
+          <button data-speed="1">1×</button><button data-speed="2">2×</button><button data-speed="4">4×</button>
+        </div>
+        <div class="forecast" id="forecast"></div>
+      </div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--c-villager)"></i>Villager</span>
+        <span><i class="dot" style="background:var(--c-militia)"></i>Militia</span>
+        <span><i class="dot" style="background:var(--c-archer)"></i>Archer</span>
+        <span><i class="dot" style="background:var(--c-scout)"></i>Scout</span>
+        <span><i class="dot" style="background:var(--c-builder)"></i>Builder</span>
+        <span><i class="tri" style="color:var(--horde)">▲</i>Horde</span>
+        <span><i class="dot" style="background:var(--heart)"></i>Heart</span>
+      </div>
+    </section>
+    <section class="side">
+      <nav class="tabs" role="tablist">
+        <button data-tab="orders">Orders</button><button data-tab="build">Build</button><button data-tab="people">People</button><button data-tab="log">Log</button>
+      </nav>
+      <div id="panel" class="panel-body"></div>
+    </section>
+  </main>
+  <div id="modal"></div>
+  <div id="toast" class="toast" role="status" hidden></div>`;
 
-// ───────────────────────── Rendering ─────────────────────────
+const view = new MapView(document.getElementById('map') as HTMLCanvasElement);
+const $ = (id: string) => document.getElementById(id)!;
 
-function pips(q: Squad) {
-  const e = MAX_SQUAD - q.health - q.wounded;
-  return `<span class="pips"><span class="pip-h">${'●'.repeat(q.health)}</span><span class="pip-w">${'●'.repeat(q.wounded)}</span><span class="pip-e">${'○'.repeat(Math.max(0, e))}</span></span>`;
-}
+// ───────────── Panels ─────────────
 
-function status(q: Squad): string {
-  const a = q.assignment;
-  switch (a.type) {
-    case 'guard':
-      return 'On guard';
-    case 'work':
-      return 'Working';
-    case 'train':
-      return `Training as ${ROLE_INFO[a.role].label} (${a.daysLeft}d)`;
-    case 'expedition':
-      return `${a.mission === 'scout' ? 'Scouting' : 'Expedition'} ${sectorOf(a.target)} · back in ${a.daysLeft}d`;
-  }
-}
+const pct = (x: number) => `${Math.round(x * 100)}%`;
 
-type Tab = 'wilds' | 'colony' | 'squads' | 'log';
-let tab: Tab = 'wilds';
-let showHelp = false;
-
-function topBar() {
-  const est = assaultEstimate(s);
-  const heart = Object.entries(s.intel).find(([, i]) => i.source);
-  const net = income(s) - upkeep(s);
-  const busy = !!(s.battle || s.event || s.outcome !== 'playing');
+function hudHtml() {
+  const pop = s.colonists.length;
+  const night = s.time % 24 >= 20 || s.time % 24 < 6;
+  const food = pop * (s.settlement.inner.granary ? 0.67 : 1);
   return `
-  <header class="top wrap">
-    <div class="top-row">
-      <div class="brand">Holdfast</div>
-      <div class="stat"><span class="k">Day</span><span class="v">${s.day}</span></div>
-      <div class="stat"><span class="k">Supplies</span><span class="v">${s.supplies} <small>${net >= 0 ? '+' : ''}${net}/d</small></span></div>
-      <div class="stat"><span class="k">People</span><span class="v">${people(s)}</span></div>
-      <div class="stat"><span class="k">Keep</span><span class="v">${s.settlement.keepHp}</span></div>
-      <div class="spacer"></div>
-      <button class="small" data-a="help" aria-label="How to play">?</button>
-      <button class="small desk" data-a="new">New run</button>
-      <button class="primary desk" data-a="next" ${busy ? 'disabled' : ''}>Next day ⏎</button>
-    </div>
-    <div class="forecast">
-      <span>Assault: <b>${est.minDays === 0 ? 'any day now' : `${est.minDays}–${est.maxDays} days`}</b>${est.dir ? ` from the <b>${est.dir}</b>` : ', direction unknown'}</span>
-      <span>Heart: <b>${heart ? `${sectorOf(parsePos(heart[0]))}, ${heart[1].uncertain ? 'may have moved' : 'fresh'}` : 'not found'}</b> · strength ${Math.round(s.source.strength)}</span>
-    </div>
-    ${est.signs.length ? `<div class="signs">${est.signs.map((x) => `◆ ${x}`).join(' ')}</div>` : ''}
-  </header>`;
+    <div class="brand">Holdfast</div>
+    <div class="stat"><span class="k">Day ${dayOf(s.time)}</span><span class="v">${clock(s.time)} ${night ? '☾' : '☀'}</span></div>
+    <div class="stat"><span class="k">Supplies</span><span class="v">${Math.floor(s.supplies)} <small>−${food.toFixed(0)}/day</small></span></div>
+    <div class="stat"><span class="k">People</span><span class="v">${pop}</span></div>
+    <div class="stat"><span class="k">Keep</span><span class="v ${s.settlement.keepHp < 20 ? 'bad' : ''}">${Math.ceil(s.settlement.keepHp)}</span></div>
+    <div class="spacer"></div>
+    <button class="small" data-act="help" aria-label="How to play">?</button>`;
 }
 
-function parsePos(k: string): Pos {
-  const [x, y] = k.split(',').map(Number) as [number, number];
-  return { x, y };
+function slider(l: Labor, counts: Record<Labor, number>, total: number) {
+  const v = s.labor[l];
+  return `<div class="slider">
+    <div class="row"><b>${LABOR_INFO[l].label}</b><span class="hint grow">${LABOR_INFO[l].desc}</span><span class="count" title="People on this job">${counts[l]}</span></div>
+    <input type="range" id="labor-${l}" min="0" max="100" step="5" value="${v}" data-labor="${l}" aria-label="${LABOR_INFO[l].label} priority">
+    <div class="hint">${pct(total ? v / total : 0)} of the workforce</div>
+  </div>`;
 }
 
-function buildBtn(spec: ProjectKind, label: string) {
+function ordersPanel() {
+  const counts = laborCounts(s);
+  const total = (Object.keys(s.labor) as Labor[]).reduce((n, l) => n + s.labor[l], 0);
+  const wb = s.warband;
+  const striking = s.colonists.filter((c) => c.task === 'strike');
+  const party = strikeParty(s);
+  const odds = strikeOdds(s, party);
+  const seen = s.heart.seen;
+  let heart = '';
+  if (striking.length) {
+    heart = `<p>${striking.length} fighters are out on the strike${s.heart.fightTimer > 0 ? ', fighting the heart now' : ''}.</p>
+      <button data-act="recall">Call them back</button>`;
+  } else if (!seen) {
+    heart = '<p class="hint">Nobody has seen the heart yet. Scouts will find it in time; the blight gathers around it.</p>';
+  } else {
+    const age = s.time - seen.at;
+    heart = `<p>Last seen in the <b>${sectorName(seen)}</b>, ${Math.round(dist(seen))} paces out, ${age < 1 ? 'in sight now' : `${Math.round(age)}h ago`}${seen.uncertain ? ' <span class="bad">(the land has shifted; it may have moved)</span>' : ''}.</p>
+      <p class="hint">Strength ${Math.round(s.heart.strength)}. Burning out nests weakens it.</p>
+      ${
+        confirmStrike
+          ? `<div class="confirm"><p>Send all <b>${party.length}</b> militia and archers? The walls will be thin while they are gone.</p>
+             <div class="row"><button class="danger" data-act="strike-go">March · ${pct(odds)} chance</button><button data-act="strike-cancel">Not yet</button></div></div>`
+          : `<button class="danger" data-act="strike" ${party.length ? '' : 'disabled'}>Strike the heart · ${pct(odds)}</button>`
+      }`;
+  }
+  return `
+    ${
+      wb?.marching
+        ? `<div class="card urgent"><h3>Under attack</h3>
+          <div class="row"><button data-act="bell" ${wb.interventions ? '' : 'disabled'}>Ring the bell</button><span class="hint grow">Recall everyone in the fields; defenders fight harder for 3 hours.</span></div>
+          <div class="row"><button data-act="fire" ${wb.interventions && s.supplies >= 15 ? '' : 'disabled'}>Fire the stores</button><span class="hint grow">Burn 15 supplies to scorch the horde at the walls.</span></div>
+          <div class="hint">${wb.interventions} intervention${wb.interventions === 1 ? '' : 's'} left.</div></div>`
+        : ''
+    }
+    <div class="card"><h3>Labor</h3>
+      <p class="hint">Set priorities. People choose jobs that suit their training and finish their trips before switching.</p>
+      ${(Object.keys(LABOR_INFO) as Labor[]).map((l) => slider(l, counts, total)).join('')}
+    </div>
+    <div class="card"><h3>Directives</h3>
+      <div class="row"><span class="grow">At nightfall</span>
+        <button class="small ${s.directives.curfew ? 'on' : ''}" data-act="curfew" data-v="1">Come home</button>
+        <button class="small ${!s.directives.curfew ? 'on' : ''}" data-act="curfew" data-v="0">Work on</button></div>
+      <div class="hint">Working through the night is slower and riskier, and fewer are home if the horde comes.</div>
+      <div class="row"><span class="grow">In an assault, the untrained</span>
+        <button class="small ${s.directives.stance === 'walls' ? 'on' : ''}" data-act="stance" data-v="walls">Man the walls</button>
+        <button class="small ${s.directives.stance === 'shelter' ? 'on' : ''}" data-act="stance" data-v="shelter">Shelter</button></div>
+      <div class="hint">Sheltering saves lives, but the walls take more damage.</div>
+    </div>
+    <div class="card"><h3>The heart</h3>${heart}</div>`;
+}
+
+function buildOption(spec: ProjectSpec, label: string, desc: string) {
   const c = projectCost(s, spec);
-  if (typeof c === 'string') return `<button class="small" disabled title="${c}">${label}</button>`;
-  return `<button class="small" data-a="build" data-spec='${JSON.stringify(spec)}' ${s.supplies < c.supplies ? 'disabled' : ''} title="${c.work} work">${label} · ${c.supplies}</button>`;
+  const btn =
+    typeof c === 'string'
+      ? `<span class="hint">${c}</span>`
+      : `<button class="small" data-act="build" data-spec='${JSON.stringify(spec)}' ${s.supplies < c.supplies ? 'disabled' : ''}>Build · ${c.supplies}</button>`;
+  return `<div class="row opt"><span class="grow"><b>${label}</b><br><span class="hint">${desc}</span></span>${btn}</div>`;
 }
 
-function settlementPanel() {
-  const st = s.settlement;
-  const walls = DIRS.map((d) => {
-    const w = st.walls[d];
-    return `<div class="row"><b style="width:18px">${d}</b>
-      <span class="grow">${w.level ? `Wall ${w.level} <span class="hint">${w.hp}/${w.level * 10}</span>` : '<span class="muted">open</span>'}${st.towers[d] ? ' · Tower' : ''}</span>
-      ${buildBtn({ kind: 'wall', dir: d }, w.level >= MAX_WALL ? 'Max' : 'Wall+')}
-      ${st.towers[d] ? '' : buildBtn({ kind: 'tower', dir: d }, 'Tower')}
-    </div>`;
-  }).join('');
-  const inner = (Object.keys(INNER_INFO) as InnerBuilding[])
-    .map((b) => `<div class="row"><span class="grow">${INNER_INFO[b].label}<br><span class="hint">${INNER_INFO[b].desc}</span></span>${
-      st.inner[b] ? '<span class="good">Built ✓</span>' : buildBtn({ kind: 'inner', building: b }, 'Build')
-    }</div>`)
-    .join('');
-  const workers = s.squads.filter((q) => q.assignment.type === 'work').length;
-  const projects = s.projects.length
-    ? s.projects.map((p) => `<div class="row"><span class="grow">${projectLabel(p.spec)} <span class="hint">${p.workLeft} work left</span></span><button class="small" data-a="cancel" data-id="${p.id}" aria-label="Cancel">✕</button></div>`).join('') +
-      (workers ? '' : '<div class="hint bad">No squad is set to Work, so nothing gets built.</div>')
-    : '<div class="hint">Nothing under construction. Queue a project, then set squads to Work.</div>';
-  return `
-  <div class="panel"><h2>Walls &amp; towers</h2>${walls}
-    <div class="hint">Assaults hit one side. Towers keep nearby land scouted and help archers.</div></div>
-  <div class="panel"><h2>Buildings</h2>
-    <div class="row"><span class="grow">Equipment ${st.equipment}/${MAX_EQUIPMENT}<br><span class="hint">+20% fighting power per level</span></span>${buildBtn({ kind: 'equipment' }, 'Upgrade')}</div>
-    ${inner}
-  </div>
-  <div class="panel"><h2>Construction</h2>${projects}</div>
-  <div class="panel"><h2>Doctrine</h2>
-    <div class="row"><button class="small ${s.doctrine.line === 'hold' ? 'on' : ''}" data-a="doc" data-k="line" data-v="hold">Hold the line</button>
-      <button class="small ${s.doctrine.line === 'fallback' ? 'on' : ''}" data-a="doc" data-k="line" data-v="fallback">Fall back</button></div>
-    <div class="hint">Hold: stronger, more casualties. Fall back: safer, but walls suffer.</div>
-    <div class="row"><button class="small ${s.doctrine.protect === 'people' ? 'on' : ''}" data-a="doc" data-k="protect" data-v="people">Protect people</button>
-      <button class="small ${s.doctrine.protect === 'stores' ? 'on' : ''}" data-a="doc" data-k="protect" data-v="stores">Protect stores</button></div>
-  </div>
-  <div class="panel"><h2>Specials</h2>${
-    s.specials.length ? s.specials.map((x) => `<div class="row"><span><b>${SPECIAL_INFO[x].label}</b><br><span class="hint">${SPECIAL_INFO[x].desc}</span></span></div>`).join('') : '<div class="hint">None yet. Ruins and strange sites may hold them.</div>'
-  }</div>
-  <div class="panel mobile-only"><h2>Run</h2><div class="row"><span class="grow hint">Seed ${s.seed}</span><button class="small" data-a="new">Start a new run</button></div></div>`;
-}
-
-function projectLabel(p: ProjectKind) {
+function projectName(p: ProjectSpec) {
   switch (p.kind) {
     case 'wall':
-      return `Wall ${p.dir}`;
+      return 'Palisade';
     case 'tower':
-      return `Tower ${p.dir}`;
+      return 'Watchtower';
+    case 'equipment':
+      return 'Arms & tools';
     case 'inner':
       return INNER_INFO[p.building].label;
-    case 'equipment':
-      return 'Equipment';
   }
 }
 
-function grid() {
-  const parties = new Map<string, number>();
-  for (const q of s.squads) if (q.assignment.type === 'expedition') {
-    const k = key(q.assignment.target);
-    parties.set(k, (parties.get(k) ?? 0) + 1);
-  }
-  let cells = '';
-  for (let y = -RADIUS; y <= RADIUS; y++)
-    for (let x = -RADIUS; x <= RADIUS; x++) {
-      if (x === 0 && y === 0) {
-        cells += `<div class="cell colony" title="The colony">⌂</div>`;
-        continue;
-      }
-      const k = key({ x, y });
-      const i = s.intel[k];
-      const sel = selected && selected.x === x && selected.y === y ? 'sel' : '';
-      const party = parties.get(k) ? `<span class="party">⚑${parties.get(k)}</span>` : '';
-      if (!i) {
-        cells += `<div class="cell unknown ${sel}" data-a="tile" data-x="${x}" data-y="${y}" role="button" tabindex="0" aria-label="Unknown land">${party}?</div>`;
-        continue;
-      }
-      const amt = i.kind === 'nest' || i.kind === 'forage' || i.kind === 'regrowth' || i.kind === 'refugees' ? `<span class="amt">${i.amount}</span>` : '';
-      const glyph = i.source ? '<span class="g heart">♥</span>' : `<span class="g">${TILE_INFO[i.kind].glyph}</span>`;
-      cells += `<div class="cell k-${i.kind} ${i.uncertain ? 'uncertain' : ''} ${sel}" data-a="tile" data-x="${x}" data-y="${y}" role="button" tabindex="0" aria-label="${TILE_INFO[i.kind].label}">${glyph}${amt}${party}</div>`;
-    }
-  const legend = (Object.keys(TILE_INFO) as (keyof typeof TILE_INFO)[])
-    .map((k) => `<span><span class="k-${k}">${TILE_INFO[k].glyph}</span> ${TILE_INFO[k].label}</span>`)
-    .join('');
-  return `<div class="panel"><h2>The wilds</h2>
-    <div class="wilds">${cells}</div>
-    <div class="legend">${legend}<span><span class="heart">♥</span> The heart</span><span>~ land shifted since seen</span><span class="info">⚑ party</span></div>
-  </div>`;
-}
-
-function today() {
-  const lines = s.log.filter((l) => l.day === s.day);
-  if (!lines.length) return '';
-  return `<div class="panel mobile-only"><h2>Day ${s.day}</h2><div class="today">${lines
-    .map((l) => `<div class="${l.tone ?? ''}">${l.text}</div>`)
-    .join('')}</div></div>`;
-}
-
-function chronicle() {
-  return `<div class="panel"><h2>Chronicle</h2><div class="log">${s.log
-    .slice(-120)
-    .reverse()
-    .map((l) => `<div class="${l.tone ?? ''}"><span class="d">D${l.day}</span>${l.text}</div>`)
-    .join('')}</div></div>`;
-}
-
-function tilePanel() {
-  if (!selected) return `<div class="panel"><h2>Selected land</h2><div class="hint">Tap a tile to see what you know about it and send a party there.</div></div>`;
-  const i = s.intel[key(selected)];
-  const party = s.squads.filter((q) => chosen.has(q.id));
-  const prev = actPreview(s, party, selected);
-  const days = expeditionDays(selected);
-  const avail = s.squads.filter((q) => isHome(q) && q.health > 0);
-  return `<div class="panel"><h2>${sectorOf(selected)} · ${dist(selected)} away · ${days} day${days > 1 ? 's' : ''} out and back</h2>
-    ${
-      i
-        ? `<div><b class="k-${i.kind}">${i.source ? 'The heart of the blight' : TILE_INFO[i.kind].label}</b>${i.hordeType ? ` · ${HORDE_INFO[i.hordeType].label}` : ''}</div>
-           <div class="hint">Seen on day ${i.day}${i.uncertain ? ' · <span class="bad">the land has shifted since</span>' : ''}</div>`
-        : '<div class="muted">Never seen.</div>'
-    }
-    <div class="hint" style="margin-top:4px">${prev.note}</div>
-    <div class="hint" style="margin-top:8px">Choose the party:</div>
-    <div class="party-pick">${
-      avail.length
-        ? avail.map((q) => `<button class="small ${chosen.has(q.id) ? 'on' : ''}" data-a="choose" data-id="${q.id}">${chosen.has(q.id) ? '✓ ' : ''}${q.name} · ${ROLE_INFO[q.role].label} ${q.health}</button>`).join('')
-        : '<span class="hint">Every squad is away or training.</span>'
-    }</div>
-    <div class="actions">
-      <button data-a="send" data-m="scout" ${party.length ? '' : 'disabled'}>Scout</button>
-      <button class="primary" data-a="send" data-m="act" ${party.length ? '' : 'disabled'}>${prev.label}${prev.odds !== null && party.length ? ` · ${Math.round(prev.odds * 100)}%` : ''}</button>
+function buildPanel() {
+  const st = s.settlement;
+  const builders = laborCounts(s).build;
+  const q = s.projects.length
+    ? s.projects
+        .map(
+          (p, i) => `<div class="row"><span class="grow">${projectName(p.spec)}${i === 0 ? '' : ' <span class="hint">(queued)</span>'}
+            <span class="bar"><span style="width:${pct(1 - Math.max(0, p.workLeft) / p.workTotal)}"></span></span></span>
+            <button class="small" data-act="cancel" data-id="${p.id}" aria-label="Cancel">✕</button></div>`,
+        )
+        .join('') + (builders ? '' : '<p class="hint bad">Nobody is assigned to Build. Raise the Build slider in Orders.</p>')
+    : '<p class="hint">Nothing under construction. Builders mend the walls when idle.</p>';
+  const damaged = st.wallHp.filter((h) => h < st.wallLevel * WALL_HP).length;
+  return `
+    <div class="card"><h3>Under construction</h3>${q}</div>
+    <div class="card"><h3>Defenses</h3>
+      ${buildOption({ kind: 'wall' }, `Palisade${st.wallLevel < MAX_WALL ? ` level ${st.wallLevel + 1}` : ''}`, `Now level ${st.wallLevel}${damaged ? `, ${damaged} section${damaged > 1 ? 's' : ''} damaged` : ''}. Holds back swarmers and brutes; fliers pass over.`)}
+      ${buildOption({ kind: 'tower' }, `Watchtower (${st.towers.length}/${MAX_TOWERS})`, 'Raised facing the worst threat. Shoots, and keeps nearby land in sight.')}
+      ${buildOption({ kind: 'equipment' }, `Arms & tools (${st.equipment}/${MAX_EQUIPMENT})`, '+20% fighting power for everyone.')}
     </div>
-    <div class="hint" style="margin-top:6px">Squads away from home do not defend the colony.</div>
-  </div>`;
+    <div class="card"><h3>Buildings</h3>
+      ${(Object.keys(INNER_INFO) as InnerBuilding[])
+        .map((b) =>
+          st.inner[b]
+            ? `<div class="row opt"><span class="grow"><b>${INNER_INFO[b].label}</b><br><span class="hint">${INNER_INFO[b].desc}</span></span><span class="good">Built</span></div>`
+            : buildOption({ kind: 'inner', building: b }, INNER_INFO[b].label, INNER_INFO[b].desc),
+        )
+        .join('')}
+    </div>
+    <p class="hint">Where things go is up to the builders.</p>`;
 }
 
-function squadsPanel() {
-  const rows = s.squads
-    .map((q) => {
-      const home = isHome(q);
-      const roles = (Object.keys(ROLE_INFO) as Role[]).filter((r) => r !== q.role);
-      return `<div class="squad ${chosen.has(q.id) ? 'chosen' : ''}">
-        <div class="row"><b class="grow">${q.name} <span class="muted">${ROLE_INFO[q.role].label}</span></b>${pips(q)}</div>
-        <div class="hint">${status(q)}</div>
-        ${
-          home
-            ? `<div class="row">
-                <button class="small ${q.assignment.type === 'guard' ? 'on' : ''}" data-a="assign" data-t="guard" data-id="${q.id}">Guard</button>
-                <button class="small ${q.assignment.type === 'work' ? 'on' : ''}" data-a="assign" data-t="work" data-id="${q.id}">Work</button>
-                <select id="train-${q.id}" data-a="train" data-id="${q.id}" aria-label="Train ${q.name}"><option value="">Train…</option>${roles.map((r) => `<option value="${r}">${ROLE_INFO[r].label}</option>`).join('')}</select>
-                <button class="small ${mergeFrom === q.id ? 'on' : ''}" data-a="merge" data-id="${q.id}">${mergeFrom === null ? 'Merge' : mergeFrom === q.id ? 'Cancel merge' : 'Merge into this'}</button>
-              </div>`
-            : q.assignment.type === 'train'
-              ? `<div class="row"><button class="small" data-a="recall" data-id="${q.id}">Stop training</button></div>`
-              : ''
-        }
-      </div>`;
-    })
-    .join('');
-  const roleHelp = (Object.keys(ROLE_INFO) as Role[]).map((r) => `<div><b>${ROLE_INFO[r].label}</b> <span class="hint">${ROLE_INFO[r].desc}</span></div>`).join('');
-  return `<div class="panel"><h2>Squads · ${s.squads.length}</h2>
-    <div class="hint" style="margin-bottom:8px"><span class="pip-h">●</span> fit · <span class="pip-w">●</span> wounded. Each squad eats daily. Training costs 5 supplies and takes 2 days.</div>${rows}</div>
-    <div class="panel"><h2>Roles</h2>${roleHelp}</div>`;
+function peoplePanel() {
+  const rc = roleCounts(s);
+  const wounded = s.colonists.filter((c) => c.task === 'wounded').length;
+  const training = s.colonists.filter((c) => c.task === 'train');
+  const roles: Role[] = ['militia', 'archer', 'scout', 'builder'];
+  return `
+    <div class="card"><h3>The colony · ${s.colonists.length}</h3>
+      <div class="roles">${(['villager', ...roles] as Role[]).map((r) => `<div><i class="dot" style="background:var(${ROLE_INFO[r].color})"></i><b>${rc[r]}</b> ${ROLE_INFO[r].label}</div>`).join('')}</div>
+      <p class="hint">${wounded ? `${wounded} wounded, recovering. ` : ''}Everyone eats one supply a day.</p>
+    </div>
+    <div class="card"><h3>Train villagers</h3>
+      <p class="hint">${COSTS.train.supplies} supplies and half a day each. ${rc.villager} untrained villagers.</p>
+      ${roles
+        .map(
+          (r) =>
+            `<div class="row opt"><span class="grow"><b>${ROLE_INFO[r].label}</b><br><span class="hint">${ROLE_INFO[r].desc}</span></span><button class="small" data-act="train" data-role="${r}" ${s.supplies >= COSTS.train.supplies ? '' : 'disabled'}>Train</button></div>`,
+        )
+        .join('')}
+      ${
+        s.training.length || training.length
+          ? `<div class="queue">${training.map((c) => `<span class="tag">${c.name} → ${ROLE_INFO[c.trainRole ?? c.role].label} (${Math.ceil(c.timer)}h)</span>`).join('')}${s.training
+              .map((r, i) => `<button class="tag" data-act="untrain" data-i="${i}" title="Cancel">${ROLE_INFO[r].label} waiting ✕</button>`)
+              .join('')}</div>`
+          : ''
+      }
+    </div>
+    <div class="card"><h3>Specials</h3>${
+      s.specials.length ? s.specials.map((x) => `<p><b>${SPECIAL_INFO[x].label}</b><br><span class="hint">${SPECIAL_INFO[x].desc}</span></p>`).join('') : '<p class="hint">None yet. Ruins and strange sites may hold them.</p>'
+    }</div>
+    <div class="card"><h3>Run</h3><div class="row"><span class="grow hint">Seed ${s.seed} · ${s.stats.died} lost · ${s.stats.born} found or arrived</span><button class="small" data-act="new">New run</button></div></div>`;
 }
 
-function helpModal() {
-  return `<div class="modal-bg"><div class="modal help"><h3>Holdfast</h3>
-    <p>The valley is changing. A heart of blight is growing toward your colony from somewhere in the wilds. Find it and break it before it arrives.</p>
-    <ul>
-      <li><b>Wilds:</b> tap a tile, pick squads, then <b>Scout</b> to see the area or act on it: gather, salvage, rescue, clear nests, strike the heart.</li>
-      <li><b>Intel goes stale.</b> When the land shifts in a direction, what you knew there is marked ~ and may be wrong.</li>
-      <li><b>Colony:</b> queue walls, towers and buildings, then set squads to <b>Work</b>.</li>
-      <li><b>Assaults</b> come every few days. Fresh scouting narrows the warning. Only squads at home fight.</li>
-      <li>Clearing nests heals the land and weakens the heart.</li>
-      <li>Press <b>Next day</b> when your orders are set.</li>
-    </ul>
-    <div class="opts"><button class="primary" data-a="help-close">Begin</button></div></div></div>`;
+function logPanel() {
+  return `<div class="card log">${s.log
+    .slice(-150)
+    .reverse()
+    .map((l) => `<div class="${l.tone ?? ''}"><span class="d">D${dayOf(l.t)} ${clock(l.t)}</span>${l.text}</div>`)
+    .join('')}</div>`;
 }
 
-function modal() {
-  if (s.outcome !== 'playing') {
-    return `<div class="modal-bg"><div class="modal"><h3>${s.outcome === 'won' ? 'The siege is broken' : 'The light goes out'}</h3>
-      <p>${s.outcomeText}</p><p class="hint">Seed ${s.seed} · ${s.day} days · ${s.assaults} assaults weathered.</p>
-      <div class="opts"><button class="primary" data-a="new">Begin again</button></div></div></div>`;
-  }
-  if (s.battle) {
-    const b = s.battle;
-    const ivs: [Intervention, string, string][] = [
-      ['bell', 'Ring the bell', 'Defenders fight with +60% strength this round'],
-      ['fire', 'Fire the stores', 'Burn up to 8 supplies to strike the horde'],
-      ['retreat', 'Sound the retreat', 'End the battle now; lose supplies and wall'],
-    ];
-    const horde = (Object.keys(b.horde) as (keyof typeof b.horde)[]).filter((t) => b.horde[t] > 0).map((t) => `${b.horde[t]} ${HORDE_INFO[t].label.toLowerCase()}`).join(', ');
-    return `<div class="modal-bg"><div class="modal"><h3>Assault from the ${b.dir}</h3>
-      <div class="hint">Remaining: ${horde || 'none'} · Interventions left: ${b.interventionsLeft}</div>
-      <div class="blog">${b.log.map((l) => `<div>${l}</div>`).join('')}</div>
-      <div class="opts">${
-        b.done
-          ? `<button class="primary" data-a="battle">Dawn</button>`
-          : `<button class="primary" data-a="battle">Let the colony fight →</button>
-             ${ivs.map(([id, label, hint]) => `<button data-a="battle" data-iv="${id}" ${b.interventionsLeft ? '' : 'disabled'}>${label}<br><span class="hint">${hint}</span></button>`).join('')}`
-      }</div></div></div>`;
-  }
-  if (s.event) {
-    const e = s.event;
-    return `<div class="modal-bg"><div class="modal"><h3>${e.title}</h3><p>${e.text}</p>
-      <div class="opts">${e.options.map((o, idx) => `<button data-a="event" data-i="${idx}">${o.label}<br><span class="hint">${o.hint}</span></button>`).join('')}</div></div></div>`;
-  }
-  if (showHelp) return helpModal();
+function modalHtml(): string {
+  if (s.outcome !== 'playing')
+    return `<div class="modal-bg"><div class="modal"><h3>${s.outcome === 'won' ? 'The siege is broken' : 'The light goes out'}</h3><p>${s.outcomeText}</p>
+      <p class="hint">Seed ${s.seed} · ${dayOf(s.time)} days · ${s.assaults} assaults weathered · ${s.stats.died} lost.</p>
+      <div class="opts"><button class="primary" data-act="new">Begin again</button></div></div></div>`;
+  if (s.event)
+    return `<div class="modal-bg"><div class="modal"><h3>${s.event.title}</h3><p>${s.event.text}</p>
+      <div class="opts">${s.event.options.map((o, i) => `<button data-act="event" data-i="${i}">${o.label}<br><span class="hint">${o.hint}</span></button>`).join('')}</div></div></div>`;
+  if (s.alert)
+    return `<div class="modal-bg"><div class="modal"><h3>Alarm</h3><p>${s.alert}</p><p class="hint">Paused. Check your orders, then carry on.</p>
+      <div class="opts"><button class="primary" data-act="alert-ok">Carry on</button></div></div></div>`;
+  if (showHelp)
+    return `<div class="modal-bg"><div class="modal help"><h3>Holdfast</h3>
+      <p>The valley is changing. A heart of blight is growing toward your colony from somewhere in the fog. Find it and break it before it arrives.</p>
+      <ul>
+        <li>Your people run their own lives. You set <b>priorities</b> with the labor sliders, and they choose their jobs.</li>
+        <li><b>Scouts</b> push back the fog. What you saw fades when the land shifts, so keep looking.</li>
+        <li><b>Warbands</b> gather near nests, then march. Only people at home defend the walls.</li>
+        <li><b>Hunters</b> burn out nests, which heals the land and weakens the heart.</li>
+        <li>Queue construction and training. When the heart is found, choose your moment to <b>strike</b>.</li>
+        <li>Pause any time. The game pauses itself when something needs you. Tap the map to inspect.</li>
+      </ul>
+      <div class="opts"><button class="primary" data-act="help-close">Begin</button></div></div></div>`;
   return '';
 }
 
-function bottomBar() {
-  const busy = !!(s.battle || s.event || s.outcome !== 'playing');
-  const t = (id: Tab, label: string) => `<button class="tab ${tab === id ? 'on' : ''}" data-a="tab" data-t="${id}">${label}</button>`;
-  return `<nav class="bottom">${t('wilds', 'Wilds')}${t('colony', 'Colony')}${t('squads', 'Squads')}${t('log', 'Log')}
-    <button class="primary" data-a="next" ${busy ? 'disabled' : ''}>Next day</button></nav>`;
+function renderPanels(force = false) {
+  const hud = hudHtml();
+  if (hud !== lastHud) {
+    $('hud').innerHTML = hud;
+    lastHud = hud;
+  }
+  const f = forecast(s);
+  $('forecast').innerHTML = `<b class="${f.urgent ? 'bad' : ''}">${f.text}</b><span class="hint">${f.detail}</span>`;
+  $('pause').textContent = paused ? '▶' : '❚❚';
+  document.querySelectorAll<HTMLButtonElement>('[data-speed]').forEach((b) => b.classList.toggle('on', !paused && Number(b.dataset.speed) === speed));
+  document.querySelectorAll<HTMLButtonElement>('[data-tab]').forEach((b) => b.classList.toggle('on', b.dataset.tab === tab));
+  if (!dragging) {
+    const html = tab === 'orders' ? ordersPanel() : tab === 'build' ? buildPanel() : tab === 'people' ? peoplePanel() : logPanel();
+    if (force || html !== lastPanel) {
+      $('panel').innerHTML = html;
+      lastPanel = html;
+    }
+  }
+  const m = modalHtml();
+  if ($('modal').dataset.html !== m) {
+    $('modal').innerHTML = m;
+    $('modal').dataset.html = m;
+  }
+  const t = $('toast');
+  t.hidden = !toast;
+  t.textContent = toast;
+  const info = $('map-info');
+  info.hidden = !selectedInfo;
+  if (selectedInfo) info.innerHTML = selectedInfo.html;
 }
 
-function render() {
-  const scrollY = window.scrollY;
-  app.innerHTML = `${topBar()}
-    <main class="layout wrap" data-tab="${tab}">
-      <section class="col col-colony">${settlementPanel()}</section>
-      <section class="col col-wilds">${today()}${grid()}${tilePanel()}</section>
-      <section class="col col-squads">${squadsPanel()}</section>
-      <section class="col col-log">${chronicle()}</section>
-    </main>
-    ${bottomBar()}
-    ${modal()}
-    ${toast ? `<div class="toast" role="status">${toast}</div>` : ''}`;
-  window.scrollTo(0, scrollY);
+function flash(msg: string | null | void) {
+  if (!msg) return;
+  toast = msg;
+  clearTimeout(toastTimer);
+  toastTimer = window.setTimeout(() => {
+    toast = '';
+    renderPanels();
+  }, 2200);
 }
 
-// ───────────────────────── Input ─────────────────────────
+// ───────────── Map taps ─────────────
 
-app.addEventListener('click', (ev) => {
-  const el = (ev.target as HTMLElement).closest<HTMLElement>('[data-a]');
-  if (!el || el.tagName === 'SELECT') return;
+function describeAt(p: Vec) {
+  let best: { d: number; html: string; at: Vec } | null = null;
+  const consider = (at: Vec, r: number, html: string) => {
+    const d = dist(at, p) - r;
+    if (d < 6 && (!best || d < best.d)) best = { d, html, at };
+  };
+  for (const i of Object.values(s.intel)) {
+    const age = s.time - i.seenAt;
+    const amount =
+      i.kind === 'nest' ? `size ${i.amount}` : i.kind === 'survivors' ? `${i.amount} people` : i.kind === 'forest' || i.kind === 'regrowth' || i.kind === 'ruins' ? `${Math.floor(i.amount)} supplies` : '';
+    consider(
+      i,
+      i.r,
+      `<b>${FEATURE_INFO[i.kind].label}</b> · ${sectorName(i)}${amount ? ` · ${amount}` : ''}<br><span class="hint">${age < 1 ? 'In sight now' : `Seen ${Math.round(age)}h ago`}${
+        i.uncertain ? ' · <span class="bad">the land has shifted since</span>' : ''
+      }</span>`,
+    );
+  }
+  if (s.heart.seen) consider(s.heart.seen, 4, `<b>The heart of the blight</b><br><span class="hint">Strength ${Math.round(s.heart.strength)}${s.heart.seen.uncertain ? ' · may have moved' : ''}</span>`);
+  consider({ x: 0, y: 0 }, WALL_R, `<b>The colony</b><br><span class="hint">Palisade level ${s.settlement.wallLevel}, ${s.settlement.towers.length} tower${s.settlement.towers.length === 1 ? '' : 's'}</span>`);
+  const b = best as { html: string; at: Vec } | null;
+  selectedInfo = b ? { at: b.at, html: b.html } : null;
+  view.selected = b ? b.at : null;
+  renderPanels();
+}
+
+($('map') as HTMLCanvasElement).addEventListener('click', (e) => describeAt(view.toWorld(e.clientX, e.clientY)));
+
+// ───────────── Input ─────────────
+
+document.addEventListener('click', (e) => {
+  const el = (e.target as HTMLElement).closest<HTMLElement>('[data-act],[data-tab],[data-speed],#pause');
+  if (!el) return;
+  if (el.id === 'pause') {
+    paused = !paused;
+    return renderPanels();
+  }
+  if (el.dataset.tab) {
+    tab = el.dataset.tab as Tab;
+    confirmStrike = false;
+    return renderPanels(true);
+  }
+  if (el.dataset.speed) {
+    speed = Number(el.dataset.speed);
+    paused = false;
+    return renderPanels();
+  }
   const d = el.dataset;
-  const id = Number(d.id);
-  switch (d.a) {
-    case 'next':
-      return act(advanceDay(s));
-    case 'new':
-      s = newGame(randomSeed());
-      selected = null;
-      chosen.clear();
-      mergeFrom = null;
-      return act();
-    case 'tile':
-      selected = { x: Number(d.x), y: Number(d.y) };
-      return render();
-    case 'tab':
-      tab = d.t as Tab;
-      render();
-      return window.scrollTo(0, 0);
+  switch (d.act) {
     case 'help':
       showHelp = true;
-      return render();
+      break;
     case 'help-close':
       showHelp = false;
       try {
@@ -410,70 +405,137 @@ app.addEventListener('click', (ev) => {
       } catch {
         /* ignore */
       }
-      return render();
-    case 'choose':
-      if (chosen.has(id)) chosen.delete(id);
-      else chosen.add(id);
-      return render();
-    case 'assign':
-      return act(assignSquad(s, id, d.t as 'guard' | 'work'));
-    case 'merge':
-      if (mergeFrom === null) mergeFrom = id;
-      else if (mergeFrom === id) mergeFrom = null;
-      else {
-        const err = mergeSquads(s, id, mergeFrom);
-        mergeFrom = null;
-        return act(err);
-      }
-      return render();
-    case 'recall':
-      return act(recall(s, id));
-    case 'send': {
-      if (!selected) return;
-      const err = sendExpedition(s, [...chosen], selected, d.m as 'scout' | 'act');
-      if (!err) chosen.clear();
-      return act(err);
-    }
-    case 'build':
-      return act(queueProject(s, JSON.parse(d.spec!) as ProjectKind));
-    case 'cancel':
-      return act(cancelProject(s, id));
-    case 'doc':
-      return act(setDoctrine(s, { [d.k!]: d.v } as Partial<GameState['doctrine']>));
-    case 'battle':
-      battleStep(s, d.iv as Intervention | undefined);
-      return act();
+      break;
+    case 'new':
+      s = newGame(randomSeed());
+      paused = true;
+      selectedInfo = null;
+      view.selected = null;
+      break;
     case 'event':
       chooseEvent(s, Number(d.i));
-      return act();
+      break;
+    case 'alert-ok':
+      s.alert = null;
+      paused = false;
+      break;
+    case 'curfew':
+      setDirective(s, 'curfew', d.v === '1');
+      break;
+    case 'stance':
+      setDirective(s, 'stance', d.v as 'walls' | 'shelter');
+      break;
+    case 'strike':
+      confirmStrike = true;
+      break;
+    case 'strike-cancel':
+      confirmStrike = false;
+      break;
+    case 'strike-go':
+      confirmStrike = false;
+      flash(orderStrike(s));
+      break;
+    case 'recall':
+      recallStrike(s);
+      break;
+    case 'bell':
+    case 'fire':
+      flash(intervene(s, d.act));
+      break;
+    case 'build':
+      flash(queueProject(s, JSON.parse(d.spec!) as ProjectSpec));
+      break;
+    case 'cancel':
+      flash(cancelProject(s, Number(d.id)));
+      break;
+    case 'train':
+      flash(queueTraining(s, d.role as Role));
+      break;
+    case 'untrain':
+      cancelTraining(s, Number(d.i));
+      break;
+    default:
+      return;
+  }
+  save();
+  renderPanels(true);
+});
+
+document.addEventListener('input', (e) => {
+  const el = e.target as HTMLInputElement;
+  if (!el.dataset.labor) return;
+  setLabor(s, el.dataset.labor as Labor, Number(el.value));
+  // Update the percentages without rebuilding the slider being dragged.
+  const total = (Object.keys(s.labor) as Labor[]).reduce((n, l) => n + s.labor[l], 0);
+  document.querySelectorAll<HTMLInputElement>('input[data-labor]').forEach((inp) => {
+    const hint = inp.nextElementSibling as HTMLElement | null;
+    if (hint) hint.textContent = `${pct(total ? s.labor[inp.dataset.labor as Labor] / total : 0)} of the workforce`;
+  });
+});
+document.addEventListener('pointerdown', (e) => {
+  if ((e.target as HTMLElement).matches?.('input[type=range]')) dragging = true;
+});
+const endDrag = () => {
+  if (dragging) {
+    dragging = false;
+    save();
+  }
+};
+document.addEventListener('pointerup', endDrag);
+document.addEventListener('pointercancel', endDrag);
+document.addEventListener('change', endDrag);
+
+document.addEventListener('keydown', (e) => {
+  const t = e.target as HTMLElement;
+  if (t.tagName === 'INPUT' || t.tagName === 'BUTTON') return;
+  if (e.key === ' ') {
+    e.preventDefault();
+    paused = !paused;
+    renderPanels();
+  } else if (e.key === '1' || e.key === '2' || e.key === '3') {
+    speed = [1, 2, 4][Number(e.key) - 1]!;
+    paused = false;
+    renderPanels();
   }
 });
 
-app.addEventListener('change', (ev) => {
-  const el = ev.target as HTMLSelectElement;
-  if (el.dataset.a === 'train' && el.value) act(trainSquad(s, Number(el.dataset.id), el.value as Role));
-});
+matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', () => view.refreshTheme());
+new MutationObserver(() => view.refreshTheme()).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-document.addEventListener('keydown', (ev) => {
-  if (ev.key !== 'Enter' && ev.key !== ' ') return;
-  const tgt = ev.target as HTMLElement;
-  if (tgt.tagName === 'SELECT' || tgt.tagName === 'BUTTON') return;
-  if (tgt.dataset?.a === 'tile') {
-    ev.preventDefault();
-    tgt.click();
-    return;
+// ───────────── Loop ─────────────
+
+let acc = 0;
+let last = performance.now();
+let lastPanelAt = 0;
+let lastSave = 0;
+
+function frame(now: number) {
+  const dt = Math.min(0.25, (now - last) / 1000);
+  last = now;
+  const blocked = !!(s.event || s.alert || s.outcome !== 'playing' || showHelp);
+  if (!paused && !blocked) {
+    acc += (dt * speed * 24) / SECONDS_PER_DAY;
+    let n = 0;
+    while (acc >= DT && n < 200) {
+      step(s);
+      acc -= DT;
+      n++;
+      if (s.event || s.alert || s.outcome !== 'playing') {
+        acc = 0;
+        break;
+      }
+    }
   }
-  ev.preventDefault();
-  if (s.battle) {
-    battleStep(s);
-    act();
-  } else if (!s.event && s.outcome === 'playing') act(advanceDay(s));
-});
-
-try {
-  showHelp = !localStorage.getItem(HELP_KEY);
-} catch {
-  showHelp = true;
+  view.draw(s, paused || blocked ? 1 : Math.min(1, acc / DT), now);
+  if (now - lastPanelAt > 250) {
+    lastPanelAt = now;
+    renderPanels();
+  }
+  if (now - lastSave > 5000) {
+    lastSave = now;
+    save();
+  }
+  requestAnimationFrame(frame);
 }
 
 // Keep the run across live updates of the published page.
@@ -481,11 +543,14 @@ type Hot = { snapshot?: (fn: () => unknown) => void; ready?: (fn: (d: unknown) =
 const hot = (window as unknown as { claude?: { hot?: Hot } }).claude?.hot;
 hot?.snapshot?.(() => s);
 const start = (data: unknown) => {
-  if (data && typeof data === 'object' && 'squads' in (data as object)) {
-    s = data as GameState;
-    showHelp = false;
+  if (data && typeof data === 'object' && 'fogSeen' in (data as object)) s = data as GameState;
+  try {
+    showHelp = !localStorage.getItem(HELP_KEY);
+  } catch {
+    showHelp = true;
   }
-  render();
+  renderPanels(true);
+  requestAnimationFrame(frame);
 };
 if (hot?.ready) hot.ready(start);
 else start(hot?.data);

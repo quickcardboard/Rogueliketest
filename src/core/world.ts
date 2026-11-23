@@ -1,233 +1,258 @@
-import { DIRS, RADIUS, SECTORS } from './data';
+import { FOG_CELL, FOG_N, ROLE_INFO, SEGMENTS, SEGMENT_NAMES, WALL_R, WORLD_R } from './data';
 import { chance, int, next, pick, type RngState } from './rng';
-import type { Dir, GameState, HordeType, Pos, Sector, Tile, TileKind } from './types';
+import type { Feature, FeatureKind, GameState, HordeType, Vec } from './types';
 
-export const key = (p: Pos) => `${p.x},${p.y}`;
+export const len = (x: number, y: number) => Math.sqrt(x * x + y * y);
+export const dist = (a: Vec, b: Vec = { x: 0, y: 0 }) => len(a.x - b.x, a.y - b.y);
+/** Angle with north up: +x east, +y south (screen coordinates). */
+export const angleOf = (p: Vec) => Math.atan2(-p.y, p.x);
 
-/** Chebyshev distance from the colony (or between two positions). */
-export function dist(a: Pos, b: Pos = { x: 0, y: 0 }): number {
-  return Math.max(Math.abs(a.x - b.x), Math.abs(a.y - b.y));
+export function segmentOf(p: Vec): number {
+  const a = angleOf(p);
+  return (Math.round(a / ((Math.PI * 2) / SEGMENTS)) + SEGMENTS) % SEGMENTS;
 }
+export const sectorName = (p: Vec) => SEGMENT_NAMES[segmentOf(p)]!;
 
-/** Screen coordinates: +x is east, +y is south. */
-export function sectorOf(p: Pos, from: Pos = { x: 0, y: 0 }): Sector {
-  const dx = p.x - from.x;
-  const dy = p.y - from.y;
-  if (dx === 0 && dy === 0) return 'N';
-  const a = Math.atan2(-dy, dx);
-  const idx = (Math.round(a / (Math.PI / 4)) + 8) % 8;
-  return SECTORS[idx]!;
-}
-
-/** The wall direction an approach from this sector hits. */
-export function dirOfSector(s: Sector): Dir {
-  switch (s) {
-    case 'N':
-    case 'NW':
-      return 'N';
-    case 'E':
-    case 'NE':
-      return 'E';
-    case 'S':
-    case 'SE':
-      return 'S';
-    case 'W':
-    case 'SW':
-      return 'W';
-  }
-}
-
-export function allPositions(): Pos[] {
-  const out: Pos[] = [];
-  for (let y = -RADIUS; y <= RADIUS; y++)
-    for (let x = -RADIUS; x <= RADIUS; x++) if (x !== 0 || y !== 0) out.push({ x, y });
-  return out;
-}
-
-export function neighbours(p: Pos): Pos[] {
-  const out: Pos[] = [];
-  for (let dy = -1; dy <= 1; dy++)
-    for (let dx = -1; dx <= 1; dx++) {
-      if (dx === 0 && dy === 0) continue;
-      const q = { x: p.x + dx, y: p.y + dy };
-      if (dist(q) <= RADIUS && dist(q) > 0) out.push(q);
-    }
-  return out;
-}
-
-function randomHorde(r: RngState): HordeType {
+export function randomHorde(r: RngState): HordeType {
   const x = next(r);
   return x < 0.5 ? 'swarmer' : x < 0.78 ? 'brute' : 'flier';
 }
 
-function makeTile(r: RngState, p: Pos, kind: TileKind): Tile {
-  const t: Tile = { x: p.x, y: p.y, kind, amount: 0 };
-  switch (kind) {
-    case 'forage':
-      t.amount = int(r, 6, 14);
-      break;
-    case 'regrowth':
-      t.amount = 6;
-      break;
-    case 'refugees':
-      t.amount = int(r, 2, 4);
-      break;
-    case 'nest':
-      t.amount = int(r, 1, 2);
-      t.hordeType = randomHorde(r);
-      break;
-  }
-  return t;
-}
-
-export function generateWorld(r: RngState): { tiles: Record<string, Tile>; source: Pos } {
-  const tiles: Record<string, Tile> = {};
-  const edge = allPositions().filter((p) => dist(p) === RADIUS);
-  const source = pick(r, edge);
-
-  for (const p of allPositions()) {
-    const d = dist(p);
-    const ds = dist(p, source);
-    let kind: TileKind = 'empty';
-    const x = next(r);
-    if (ds === 0) kind = 'blight';
-    else if (ds === 1 && chance(r, 0.6)) kind = chance(r, 0.5) ? 'blight' : 'nest';
-    else if (d === 1) kind = x < 0.35 ? 'forage' : 'empty';
-    else if (x < 0.25) kind = 'forage';
-    else if (x < 0.33) kind = 'ruins';
-    else if (x < 0.38) kind = 'refugees';
-    else if (x < 0.43) kind = 'strange';
-    else if (x < 0.47 && d >= 3) kind = 'nest';
-    tiles[key(p)] = makeTile(r, p, kind);
-  }
-  return { tiles, source };
-}
-
-/** Marks player intel in the given sector as uncertain and logs a rumble. */
-function rumble(s: GameState, sector: Sector) {
-  for (const [k, info] of Object.entries(s.intel)) {
-    const [x, y] = k.split(',').map(Number) as [number, number];
-    if (sectorOf({ x, y }) === sector && info.day < s.day) info.uncertain = true;
-  }
-}
-
-/**
- * The land moves. Each shift mutates a small cluster of tiles; every shift
- * makes the player's intel in that sector uncertain (event-driven decay).
- */
-export function shiftLand(s: GameState): Sector[] {
+export function makeFeature(s: GameState, kind: FeatureKind, x: number, y: number): Feature {
   const r = s.rng;
-  const shifted = new Set<Sector>();
-  const count = 1 + (chance(r, 0.5) ? 1 : 0) + (dist(s.source) <= 2 ? 1 : 0);
-  for (let i = 0; i < count; i++) {
-    // Shifts cluster around the source as it nears.
-    const nearSource = chance(r, 0.4);
-    const candidates = allPositions().filter((p) => !nearSource || dist(p, s.source) <= 2);
-    const p = pick(r, candidates);
-    const t = s.tiles[key(p)]!;
-    const nearHeart = dist(p, s.source) <= 2;
-    mutate(r, s, t, nearHeart);
-    if (chance(r, 0.5)) {
-      const q = pick(r, neighbours(p));
-      mutate(r, s, s.tiles[key(q)]!, dist(q, s.source) <= 2);
-    }
-    shifted.add(sectorOf(p));
-  }
-  for (const sec of shifted) rumble(s, sec);
-  return [...shifted];
-}
-
-function mutate(r: RngState, s: GameState, t: Tile, nearHeart: boolean) {
-  if (t.x === s.source.x && t.y === s.source.y) return;
-  const replace = (kind: TileKind) => Object.assign(t, makeTile(r, t, kind), { hordeType: kind === 'nest' ? randomHorde(r) : undefined });
-  switch (t.kind) {
-    case 'empty':
-      if (nearHeart) replace(chance(r, 0.5) ? 'nest' : 'blight');
-      else replace(pick(r, ['forage', 'forage', 'refugees', 'strange', 'empty'] as TileKind[]));
-      break;
-    case 'forage':
-      if (nearHeart) replace('blight');
-      else if (chance(r, 0.5)) replace('empty');
-      else t.amount = Math.max(1, t.amount + int(r, -3, 3));
+  const f: Feature = { id: s.nextId++, kind, x, y, r: 4, amount: 0, hp: 0 };
+  switch (kind) {
+    case 'forest':
+      f.r = 5 + next(r) * 5;
+      f.amount = int(r, 25, 55);
       break;
     case 'regrowth':
-      if (nearHeart && chance(r, 0.5)) replace('blight');
-      else t.amount = Math.min(10, t.amount + 2);
-      break;
-    case 'refugees': {
-      // They move on: maybe elsewhere, maybe lost.
-      const dest = neighbours(t).map((q) => s.tiles[key(q)]!).find((q) => q.kind === 'empty');
-      if (dest && chance(r, 0.6)) Object.assign(dest, { kind: 'refugees', amount: t.amount });
-      replace('empty');
-      break;
-    }
-    case 'nest':
-      t.amount = Math.min(6, t.amount + 1);
-      break;
-    case 'blight':
-      if (!nearHeart && chance(r, 0.4)) replace('empty');
-      else {
-        const q = pick(r, neighbours(t));
-        const qt = s.tiles[key(q)]!;
-        if (qt.kind === 'empty' || qt.kind === 'forage') Object.assign(qt, makeTile(r, q, 'blight'));
-      }
-      break;
-    case 'strange':
-      if (chance(r, 0.3)) replace('empty');
+      f.r = 5;
+      f.amount = 10;
       break;
     case 'ruins':
+      f.r = 3 + next(r) * 2;
+      f.amount = int(r, 20, 40);
+      break;
+    case 'survivors':
+      f.r = 2;
+      f.amount = int(r, 2, 4);
+      break;
+    case 'nest':
+      f.r = 3.5;
+      f.amount = int(r, 1, 3);
+      f.hp = f.amount * 6;
+      f.hordeType = randomHorde(r);
+      break;
+    case 'blight':
+      f.r = 5 + next(r) * 4;
+      break;
+    case 'strange':
+      f.r = 2.5;
       break;
   }
+  return f;
 }
 
-/** The source grows toward the colony, leaving blight and nests behind. Returns true if it moved. */
-export function moveSource(s: GameState): boolean {
-  if (s.day < s.source.nextMoveDay) return false;
+function polar(r: RngState, minR: number, maxR: number, angle?: number, spread = Math.PI * 2): Vec {
+  const a = angle === undefined ? next(r) * Math.PI * 2 : angle + (next(r) - 0.5) * spread;
+  const d = minR + next(r) * (maxR - minR);
+  return { x: Math.cos(a) * d, y: -Math.sin(a) * d };
+}
+
+/** Places a feature somewhere not overlapping others. */
+function place(s: GameState, kind: FeatureKind, minR: number, maxR: number, angle?: number, spread?: number): Feature | null {
+  for (let tries = 0; tries < 30; tries++) {
+    const p = polar(s.rng, minR, maxR, angle, spread);
+    if (s.features.some((f) => dist(f, p) < f.r + 6)) continue;
+    const f = makeFeature(s, kind, p.x, p.y);
+    s.features.push(f);
+    return f;
+  }
+  return null;
+}
+
+export function generateWorld(s: GameState) {
   const r = s.rng;
-  const old = { x: s.source.x, y: s.source.y };
-  // Step one tile toward the colony along the major axis, sometimes diagonally.
-  const ax = Math.abs(old.x);
-  const ay = Math.abs(old.y);
-  if (ax >= ay || chance(r, 0.5)) s.source.x -= Math.sign(old.x);
-  if (ay >= ax || chance(r, 0.5)) s.source.y -= Math.sign(old.y);
-  s.source.nextMoveDay = s.day + int(r, 4, 6);
-  const oldTile = s.tiles[key(old)];
-  if (oldTile) Object.assign(oldTile, { kind: 'blight', amount: 0, hordeType: undefined });
-  if (dist(s.source) > 0) {
-    const here = s.tiles[key(s.source)]!;
-    Object.assign(here, { kind: 'blight', amount: 0, hordeType: undefined });
-    for (const q of neighbours(s.source)) {
-      const qt = s.tiles[key(q)]!;
-      if (qt.kind === 'empty' && chance(r, 0.3)) Object.assign(qt, makeTile(r, q, 'nest'));
+  const heartAngle = next(r) * Math.PI * 2;
+  s.heart.x = Math.cos(heartAngle) * 88;
+  s.heart.y = -Math.sin(heartAngle) * 88;
+  // Close, safe forests to get started.
+  for (let i = 0; i < 4; i++) place(s, 'forest', 16, 32);
+  for (let i = 0; i < 12; i++) place(s, 'forest', 30, 95);
+  for (let i = 0; i < 6; i++) place(s, 'ruins', 30, 92);
+  for (let i = 0; i < 4; i++) place(s, 'survivors', 30, 90);
+  for (let i = 0; i < 4; i++) place(s, 'strange', 35, 92);
+  for (let i = 0; i < 3; i++) place(s, 'nest', 50, 90);
+  // The heart's surroundings are already sick.
+  for (let i = 0; i < 3; i++) place(s, 'blight', 70, 98, heartAngle, 0.5);
+  for (let i = 0; i < 2; i++) place(s, 'nest', 62, 92, heartAngle, 0.6);
+}
+
+// ───────────── Fog & vision ─────────────
+
+export function fogIndex(x: number, y: number): number {
+  const cx = Math.floor((x + WORLD_R) / FOG_CELL);
+  const cy = Math.floor((y + WORLD_R) / FOG_CELL);
+  if (cx < 0 || cy < 0 || cx >= FOG_N || cy >= FOG_N) return -1;
+  return cy * FOG_N + cx;
+}
+
+export function cellCenter(i: number): Vec {
+  return { x: (i % FOG_N) * FOG_CELL - WORLD_R + FOG_CELL / 2, y: Math.floor(i / FOG_N) * FOG_CELL - WORLD_R + FOG_CELL / 2 };
+}
+
+export function isVisible(s: GameState, p: Vec): boolean {
+  const i = fogIndex(p.x, p.y);
+  return i >= 0 && s.fogSeen[i]! >= s.time - 0.25;
+}
+
+export function isNight(s: GameState): boolean {
+  const h = s.time % 24;
+  return h < 6 || h >= 20;
+}
+
+function sightOf(s: GameState, base: number): number {
+  return base * (s.specials.includes('cartographer') ? 1.4 : 1) * (isNight(s) ? 0.6 : 1);
+}
+
+/** Reveals everything within sight of colonists, the colony and towers. */
+export function updateVision(s: GameState) {
+  const eyes: { x: number; y: number; r: number }[] = [{ x: 0, y: 0, r: sightOf(s, 18) }];
+  for (const a of s.settlement.towers) eyes.push({ x: Math.cos(a) * WALL_R, y: -Math.sin(a) * WALL_R, r: sightOf(s, 30) });
+  for (const c of s.colonists) if (c.task !== 'wounded') eyes.push({ x: c.x, y: c.y, r: sightOf(s, ROLE_INFO[c.role].sight) });
+
+  for (const e of eyes) {
+    const span = Math.ceil(e.r / FOG_CELL);
+    const cx = Math.floor((e.x + WORLD_R) / FOG_CELL);
+    const cy = Math.floor((e.y + WORLD_R) / FOG_CELL);
+    for (let dy = -span; dy <= span; dy++)
+      for (let dx = -span; dx <= span; dx++) {
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x < 0 || y < 0 || x >= FOG_N || y >= FOG_N) continue;
+        const c = cellCenter(y * FOG_N + x);
+        if (len(c.x - e.x, c.y - e.y) > e.r) continue;
+        s.fogSeen[y * FOG_N + x] = s.time;
+        s.fogStale[y * FOG_N + x] = 0;
+      }
+  }
+
+  // Update memories of what is visible now.
+  for (const f of s.features) {
+    if (!isVisible(s, f)) continue;
+    s.intel[f.id] = { x: f.x, y: f.y, kind: f.kind, r: f.r, amount: f.amount, hordeType: f.hordeType, seenAt: s.time, uncertain: false };
+  }
+  for (const [id, i] of Object.entries(s.intel)) {
+    if (!isVisible(s, i)) continue;
+    const f = s.features.find((x) => x.id === Number(id));
+    if (!f || dist(f, i) > 1) delete s.intel[Number(id)];
+  }
+  if (isVisible(s, s.heart)) s.heart.seen = { x: s.heart.x, y: s.heart.y, at: s.time, uncertain: false };
+  else if (s.heart.seen && isVisible(s, s.heart.seen)) s.heart.seen.uncertain = true;
+}
+
+/** How much of the land within `radius` the colony has fresh knowledge of (0..1). */
+export function freshness(s: GameState, radius: number): number {
+  let n = 0;
+  let fresh = 0;
+  for (let i = 0; i < s.fogSeen.length; i++) {
+    const c = cellCenter(i);
+    if (len(c.x, c.y) > radius) continue;
+    n++;
+    if (s.fogSeen[i]! >= 0 && !s.fogStale[i] && s.time - s.fogSeen[i]! < 72) fresh++;
+  }
+  return n ? fresh / n : 0;
+}
+
+// ───────────── The land shifts ─────────────
+
+function rumble(s: GameState, seg: number) {
+  for (let i = 0; i < s.fogSeen.length; i++) {
+    const c = cellCenter(i);
+    if (len(c.x, c.y) > WALL_R + 12 && segmentOf(c) === seg && s.fogSeen[i]! < s.time - 0.25) s.fogStale[i] = 1;
+  }
+  for (const i of Object.values(s.intel)) if (segmentOf(i) === seg && dist(i) > WALL_R + 12 && !isVisible(s, i)) i.uncertain = true;
+  if (s.heart.seen && segmentOf(s.heart.seen) === seg && !isVisible(s, s.heart.seen)) s.heart.seen.uncertain = true;
+}
+
+/** One shift: a sector of the wilds changes. Returns the sector index. */
+export function shiftLand(s: GameState): number {
+  const r = s.rng;
+  const nearHeart = chance(r, 0.45);
+  const seg = nearHeart ? segmentOf(s.heart) : int(r, 0, 7);
+  const inSeg = s.features.filter((f) => segmentOf(f) === seg && dist(f) > 20);
+  const nearH = (f: Vec) => dist(f, s.heart) < 30;
+  const changes = 1 + (chance(r, 0.5) ? 1 : 0);
+  for (let k = 0; k < changes; k++) {
+    const f = inSeg.length ? pick(r, inSeg) : null;
+    if (!f || chance(r, 0.3)) {
+      // Something new appears.
+      const a = (seg * Math.PI * 2) / 8;
+      const p = polar(r, 30, 95, a, Math.PI / 4);
+      const kind: FeatureKind = nearH(p) ? pick(r, ['nest', 'blight'] as FeatureKind[]) : pick(r, ['forest', 'forest', 'survivors', 'strange', 'ruins'] as FeatureKind[]);
+      if (!s.features.some((g) => dist(g, p) < g.r + 5)) s.features.push(makeFeature(s, kind, p.x, p.y));
+      continue;
+    }
+    switch (f.kind) {
+      case 'forest':
+        if (nearH(f)) Object.assign(f, { kind: 'blight', amount: 0 });
+        else f.amount = Math.max(0, f.amount + int(r, -12, 8));
+        break;
+      case 'regrowth':
+        if (nearH(f)) Object.assign(f, { kind: 'blight', amount: 0 });
+        else f.amount = Math.min(30, f.amount + 5);
+        break;
+      case 'survivors': {
+        // They move on, or are lost.
+        if (chance(r, 0.6)) {
+          f.x += (next(r) - 0.5) * 30;
+          f.y += (next(r) - 0.5) * 30;
+          if (dist(f) > WORLD_R - 4) s.features = s.features.filter((g) => g !== f);
+        } else s.features = s.features.filter((g) => g !== f);
+        break;
+      }
+      case 'nest':
+        f.amount = Math.min(6, f.amount + 1);
+        f.hp = f.amount * 6;
+        break;
+      case 'blight': {
+        const p = { x: f.x + (next(r) - 0.5) * 20, y: f.y + (next(r) - 0.5) * 20 };
+        if (dist(p) < WORLD_R - 4 && !s.features.some((g) => dist(g, p) < g.r + 3)) s.features.push(makeFeature(s, nearH(p) && chance(r, 0.4) ? 'nest' : 'blight', p.x, p.y));
+        break;
+      }
+      case 'strange':
+        if (chance(r, 0.4)) s.features = s.features.filter((g) => g !== f);
+        break;
+      case 'ruins':
+        break;
     }
   }
-  rumble(s, sectorOf(old));
-  if (dist(s.source) > 0) rumble(s, sectorOf(s.source));
-  return true;
+  s.features = s.features.filter((f) => !(f.kind === 'forest' && f.amount <= 0));
+  rumble(s, seg);
+  return seg;
 }
 
-/** Records current ground truth of a tile as fresh intel. */
-export function reveal(s: GameState, p: Pos) {
-  const t = s.tiles[key(p)];
-  if (!t) return;
-  s.intel[key(p)] = {
-    kind: t.kind,
-    amount: t.amount,
-    hordeType: t.hordeType,
-    day: s.day,
-    uncertain: false,
-    source: t.x === s.source.x && t.y === s.source.y,
-  };
-}
+// ───────────── The heart ─────────────
 
-export function revealArea(s: GameState, center: Pos, radius: number) {
-  for (const p of allPositions()) if (dist(p, center) <= radius) reveal(s, p);
-}
-
-/** Watchtowers keep intel fresh on the nearest tiles in their direction. */
-export function towerWatch(s: GameState) {
-  for (const d of DIRS) {
-    if (!s.settlement.towers[d]) continue;
-    for (const p of allPositions()) if (dist(p) <= 1 && dirOfSector(sectorOf(p)) === d) reveal(s, p);
+/** The heart creeps toward the colony, leaving blight and nests behind. Returns true if it arrived. */
+export function moveHeart(s: GameState, dt: number): boolean {
+  const h = s.heart;
+  const d = dist(h);
+  if (h.fightTimer > 0) return false;
+  // Slow at first, faster as it grows.
+  const speed = (2.6 + s.time / 24 / 10) / 24;
+  h.x -= (h.x / d) * speed * dt;
+  h.y -= (h.y / d) * speed * dt;
+  if (s.time >= h.nextBlight) {
+    h.nextBlight = s.time + 14 + next(s.rng) * 10;
+    if (!s.features.some((f) => f.kind === 'blight' && dist(f, h) < 6)) s.features.push(makeFeature(s, 'blight', h.x, h.y));
   }
+  if (s.time >= h.nextNest) {
+    h.nextNest = s.time + 30 + next(s.rng) * 24;
+    const p = polar(s.rng, 6, 14);
+    const q = { x: h.x + p.x, y: h.y + p.y };
+    if (dist(q) > WALL_R + 15 && dist(q) < WORLD_R) s.features.push(makeFeature(s, 'nest', q.x, q.y));
+  }
+  return dist(h) <= WALL_R + 3;
 }

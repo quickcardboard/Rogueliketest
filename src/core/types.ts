@@ -1,117 +1,129 @@
 import type { RngState } from './rng';
 
-export type Role = 'militia' | 'archer' | 'scout' | 'builder';
-export type Dir = 'N' | 'E' | 'S' | 'W';
-export type Sector = 'E' | 'NE' | 'N' | 'NW' | 'W' | 'SW' | 'S' | 'SE';
+export type Role = 'villager' | 'militia' | 'archer' | 'scout' | 'builder';
+export type Labor = 'gather' | 'build' | 'scout' | 'guard' | 'hunt';
 export type HordeType = 'swarmer' | 'brute' | 'flier';
-export type TileKind =
-  | 'empty'
-  | 'forage'
-  | 'ruins'
-  | 'refugees'
-  | 'nest'
-  | 'blight'
-  | 'strange'
-  | 'regrowth';
+export type FeatureKind = 'forest' | 'regrowth' | 'ruins' | 'survivors' | 'nest' | 'blight' | 'strange';
+export type TaskKind = 'idle' | 'gather' | 'build' | 'scout' | 'guard' | 'hunt' | 'strike' | 'home' | 'train' | 'wounded';
+export type InnerBuilding = 'granary' | 'infirmary' | 'workshop' | 'hearth';
+export type SpecialId = 'cartographer' | 'bell' | 'seedVault' | 'hearthstone' | 'lantern';
 
-export interface Pos {
+export interface Vec {
   x: number;
   y: number;
 }
 
-/** Ground truth for a tile in the wilds. Coordinates are relative to the colony (0,0). */
-export interface Tile extends Pos {
-  kind: TileKind;
-  /** Forage/regrowth: supplies left. Nest: size. Refugees: people. */
+/** Ground truth about something in the wilds. World units; the colony sits at (0,0). */
+export interface Feature extends Vec {
+  id: number;
+  kind: FeatureKind;
+  r: number;
+  /** Forest/regrowth/ruins: supplies left. Nest: size. Survivors: people. */
   amount: number;
+  /** Nest health while being hunted. */
+  hp: number;
   hordeType?: HordeType;
 }
 
-/** What the player believes about a tile. */
-export interface Intel {
-  kind: TileKind;
+/** What the colony remembers about a feature. */
+export interface Intel extends Vec {
+  kind: FeatureKind;
+  r: number;
   amount: number;
   hordeType?: HordeType;
-  /** Day this intel was gathered. */
-  day: number;
-  /** Set when the land shifted in this tile's sector after the intel was gathered. */
+  seenAt: number;
+  /** The land shifted in this sector after it was seen. */
   uncertain: boolean;
-  /** The source was seen on this tile when it was scouted. */
-  source: boolean;
 }
 
-export type Mission = 'scout' | 'act';
+export interface Heart extends Vec {
+  strength: number;
+  /** Last place the colony saw it, or null. */
+  seen: (Vec & { at: number; uncertain: boolean }) | null;
+  nextBlight: number;
+  nextNest: number;
+  /** While a strike force is fighting it. */
+  fightTimer: number;
+}
 
-export type Assignment =
-  | { type: 'guard' }
-  | { type: 'work' }
-  | { type: 'train'; role: Role; daysLeft: number }
-  | { type: 'expedition'; target: Pos; mission: Mission; daysLeft: number; party: number };
-
-export interface Squad {
+export interface Colonist extends Vec {
   id: number;
   name: string;
   role: Role;
-  /** Able-bodied people (max 5 together with wounded). */
-  health: number;
-  wounded: number;
-  assignment: Assignment;
+  hp: number;
+  /** Previous position, for smooth rendering between steps. */
+  px: number;
+  py: number;
+  labor: Labor | null;
+  task: TaskKind;
+  phase: string;
+  tx: number;
+  ty: number;
+  target: number;
+  carry: number;
+  timer: number;
+  trainRole?: Role;
 }
 
-export type InnerBuilding = 'granary' | 'infirmary' | 'workshop' | 'hearth';
+export interface HordeUnit extends Vec {
+  id: number;
+  type: HordeType;
+  hp: number;
+  px: number;
+  py: number;
+  /** roam: guards a nest. gather: warband forming. march/siege: assault. */
+  mode: 'roam' | 'gather' | 'march' | 'siege';
+  nest: number;
+  tx: number;
+  ty: number;
+}
 
-export type ProjectKind =
-  | { kind: 'wall'; dir: Dir }
-  | { kind: 'tower'; dir: Dir }
+export type ProjectSpec =
+  | { kind: 'wall' }
+  | { kind: 'tower' }
   | { kind: 'inner'; building: InnerBuilding }
   | { kind: 'equipment' };
 
 export interface Project {
   id: number;
-  spec: ProjectKind;
+  spec: ProjectSpec;
   workLeft: number;
+  workTotal: number;
 }
 
 export interface Settlement {
-  walls: Record<Dir, { level: number; hp: number }>;
-  towers: Record<Dir, boolean>;
+  wallLevel: number;
+  /** Hit points of the 8 wall segments (E, NE, N, NW, W, SW, S, SE). */
+  wallHp: number[];
+  /** Angles (radians) of watchtowers on the wall. */
+  towers: number[];
   inner: Record<InnerBuilding, boolean>;
   equipment: number;
   keepHp: number;
 }
 
-export type SpecialId = 'cartographer' | 'bell' | 'seedVault' | 'hearthstone' | 'lantern';
-
-export interface Source extends Pos {
-  strength: number;
-  nextMoveDay: number;
+export interface Directives {
+  /** At dusk, everyone comes home; or they keep working through the night. */
+  curfew: boolean;
+  /** Everyone at home mans the walls during an assault, or the untrained shelter in the keep. */
+  stance: 'walls' | 'shelter';
 }
 
-export type Doctrine = {
-  line: 'hold' | 'fallback';
-  protect: 'people' | 'stores';
-};
-
-export type Intervention = 'bell' | 'fire' | 'retreat';
-
-export interface Battle {
-  dir: Dir;
-  round: number;
-  maxRounds: number;
-  horde: Record<HordeType, number>;
-  interventionsLeft: number;
-  log: string[];
-  done: boolean;
-  /** Totals for the aftermath summary. */
+export interface Warband {
+  units: number;
+  start: number;
+  dir: number;
   killed: number;
   lost: number;
-  wounded: number;
-  suppliesLost: number;
+  stolen: number;
+  interventions: number;
+  marching: boolean;
+  gatherUntil: number;
+  announced: boolean;
 }
 
 export interface EventOption {
   label: string;
-  /** Short preview of costs/odds shown to the player. */
   hint: string;
 }
 
@@ -122,28 +134,52 @@ export interface PendingEvent {
   options: EventOption[];
 }
 
+export interface LogEntry {
+  t: number;
+  text: string;
+  tone?: 'good' | 'bad' | 'info';
+}
+
 export type Outcome = 'playing' | 'won' | 'lost';
 
 export interface GameState {
   seed: number;
   rng: RngState;
-  day: number;
+  /** Hours since the start; day 1 starts at hour 0, dawn at 6. */
+  time: number;
+  steps: number;
   supplies: number;
-  squads: Squad[];
+  colonists: Colonist[];
+  horde: HordeUnit[];
+  features: Feature[];
+  intel: Record<number, Intel>;
+  /** Per fog cell: hour last seen (-1 never). */
+  fogSeen: number[];
+  /** Per fog cell: 1 when the land shifted there since it was last seen. */
+  fogStale: number[];
+  heart: Heart;
   nextId: number;
   settlement: Settlement;
   projects: Project[];
-  tiles: Record<string, Tile>;
-  intel: Record<string, Intel>;
-  source: Source;
+  training: Role[];
+  labor: Record<Labor, number>;
+  directives: Directives;
   specials: SpecialId[];
-  doctrine: Doctrine;
   threat: number;
   threshold: number;
+  warband: Warband | null;
   assaults: number;
-  battle: Battle | null;
+  nextShift: number;
   event: PendingEvent | null;
-  log: { day: number; text: string; tone?: 'good' | 'bad' | 'info' }[];
+  /** Set when something happened the player should look at; the UI pauses. */
+  alert: string | null;
+  log: LogEntry[];
   outcome: Outcome;
   outcomeText: string;
+  stats: { born: number; died: number; gathered: number };
+  /** Hours the stores have been empty. */
+  hunger: number;
+  bellUntil: number;
+  /** Set when sliders change so labor is reassigned on the next step. */
+  dirtyLabor: boolean;
 }

@@ -1,81 +1,117 @@
-import { KEEP_HP, SOURCE_MOVE_EVERY, SPECIAL_INFO, SQUAD_NAMES, WALL_HP_PER_LEVEL } from './data';
-import { int, makeRng } from './rng';
-import type { GameState, Role, SpecialId, Squad } from './types';
-import { dirOfSector, generateWorld, revealArea, sectorOf } from './world';
+import { FOG_N, KEEP_HP, NAMES, ROLE_INFO, SEGMENTS, SPECIAL_INFO, WALL_HP } from './data';
+import { int, makeRng, pick } from './rng';
+import type { Colonist, GameState, Role, SpecialId } from './types';
+import { generateWorld, updateVision } from './world';
+
+export function dayOf(t: number) {
+  return Math.floor(t / 24) + 1;
+}
+
+export function clock(t: number) {
+  const h = Math.floor(t % 24);
+  const m = Math.floor(((t % 1) * 60) / 15) * 15;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}`;
+}
 
 export function addLog(s: GameState, text: string, tone?: 'good' | 'bad' | 'info') {
-  s.log.push({ day: s.day, text, tone });
+  s.log.push({ t: s.time, text, tone });
+  if (s.log.length > 300) s.log.splice(0, s.log.length - 300);
 }
 
-export function addSquad(s: GameState, role: Role, health: number): Squad {
+export function spawnColonist(s: GameState, role: Role, x = 0, y = 0): Colonist {
   const id = s.nextId++;
-  const q: Squad = {
+  const c: Colonist = {
     id,
-    name: SQUAD_NAMES[(id - 1) % SQUAD_NAMES.length]!,
+    name: NAMES[id % NAMES.length]!,
     role,
-    health,
-    wounded: 0,
-    assignment: { type: 'guard' },
+    hp: ROLE_INFO[role].hp,
+    x,
+    y,
+    px: x,
+    py: y,
+    labor: null,
+    task: 'idle',
+    phase: '',
+    tx: x,
+    ty: y,
+    target: -1,
+    carry: 0,
+    timer: 0,
   };
-  s.squads.push(q);
-  return q;
+  s.colonists.push(c);
+  return c;
 }
 
-export function grantSpecial(s: GameState, id: SpecialId) {
+/** Fighting power of one colonist, used for nests and the heart. */
+export function colonistPower(s: GameState, c: Colonist): number {
+  return ROLE_INFO[c.role].dps * (1 + 0.2 * s.settlement.equipment);
+}
+
+export function grantSpecial(s: GameState, id: SpecialId, prefix = 'Found: ') {
   if (s.specials.includes(id)) return;
   s.specials.push(id);
-  addLog(s, `Found: ${SPECIAL_INFO[id].label}. ${SPECIAL_INFO[id].desc}`, 'good');
+  addLog(s, `${prefix}${SPECIAL_INFO[id].label}. ${SPECIAL_INFO[id].desc}`, 'good');
 }
 
-export function people(s: GameState): number {
-  return s.squads.reduce((n, q) => n + q.health + q.wounded, 0);
+export function grantRandomSpecial(s: GameState, prefix?: string): boolean {
+  const left = (Object.keys(SPECIAL_INFO) as SpecialId[]).filter((x) => !s.specials.includes(x));
+  if (!left.length) return false;
+  grantSpecial(s, pick(s.rng, left), prefix);
+  return true;
 }
 
 export function newGame(seed: number): GameState {
-  const rng = makeRng(seed);
-  const world = generateWorld(rng);
   const s: GameState = {
     seed,
-    rng,
-    day: 1,
-    supplies: 30,
-    squads: [],
+    rng: makeRng(seed),
+    time: 6,
+    steps: 0,
+    supplies: 40,
+    colonists: [],
+    horde: [],
+    features: [],
+    intel: {},
+    fogSeen: new Array(FOG_N * FOG_N).fill(-1),
+    fogStale: new Array(FOG_N * FOG_N).fill(0),
+    heart: { x: 0, y: 0, strength: 20, seen: null, nextBlight: 20, nextNest: 40, fightTimer: 0 },
     nextId: 1,
     settlement: {
-      walls: { N: { level: 0, hp: 0 }, E: { level: 0, hp: 0 }, S: { level: 0, hp: 0 }, W: { level: 0, hp: 0 } },
-      towers: { N: false, E: false, S: false, W: false },
+      wallLevel: 1,
+      wallHp: new Array(SEGMENTS).fill(WALL_HP),
+      towers: [],
       inner: { granary: false, infirmary: false, workshop: false, hearth: false },
       equipment: 0,
       keepHp: KEEP_HP,
     },
     projects: [],
-    tiles: world.tiles,
-    intel: {},
-    source: { ...world.source, strength: 14, nextMoveDay: SOURCE_MOVE_EVERY + 1 },
+    training: [],
+    labor: { gather: 40, build: 15, scout: 15, guard: 20, hunt: 10 },
+    directives: { curfew: true, stance: 'walls' },
     specials: [],
-    doctrine: { line: 'hold', protect: 'people' },
     threat: 0,
-    threshold: 12 + int(rng, 0, 5),
+    threshold: 0,
+    warband: null,
     assaults: 0,
-    battle: null,
+    nextShift: 10,
     event: null,
+    alert: null,
     log: [],
     outcome: 'playing',
     outcomeText: '',
+    stats: { born: 0, died: 0, gathered: 0 },
+    hunger: 0,
+    bellUntil: 0,
+    dirtyLabor: true,
   };
-  addSquad(s, 'militia', 5);
-  addSquad(s, 'militia', 4);
-  addSquad(s, 'archer', 4);
-  addSquad(s, 'scout', 3);
-  addSquad(s, 'builder', 4);
-  // One wall section already stands, facing the worst of it.
-  const facing = dirOfSector(sectorOf(s.source));
-  s.settlement.walls[facing] = { level: 1, hp: WALL_HP_PER_LEVEL };
-  revealArea(s, { x: 0, y: 0 }, 1);
-  addLog(
-    s,
-    'The valley is changing. Somewhere out there, the heart of the blight is growing toward us. We hold here, and we look for it.',
-    'info',
-  );
+  s.threshold = 34 + int(s.rng, 0, 8);
+  generateWorld(s);
+  const start: Role[] = ['villager', 'villager', 'villager', 'villager', 'villager', 'villager', 'villager', 'villager', 'militia', 'militia', 'militia', 'archer', 'archer', 'scout', 'scout', 'builder'];
+  for (const r of start) spawnColonist(s, r);
+  for (const c of s.colonists) {
+    c.x = c.px = Math.cos(c.id) * 3;
+    c.y = c.py = Math.sin(c.id) * 3;
+  }
+  updateVision(s);
+  addLog(s, 'The valley is changing. Somewhere out there, the heart of the blight is growing toward us. We hold here, and we look for it.', 'info');
   return s;
 }
